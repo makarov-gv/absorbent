@@ -1,0 +1,25 @@
+[project]
+name = "absorbent"
+version = "0.1.0"
+description = "Лекционное видео -> структурированный конспект в Markdown."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "openai>=1.0",
+    "openai-whisper",
+    "torch",
+    "pyyaml",
+    "imagehash",
+    "Pillow",
+    "numpy",
+]
+
+[project.scripts]
+absorbent = "absorbent.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/absorbent"]
