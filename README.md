@@ -148,9 +148,12 @@ pandoc notes.md --embed-resources --standalone -o notes.html
 ```
 
 ## Разработка
-
-- Код — Python 3.13+, пакет в `src/absorbent/`, каждый этап — отдельный
+<｜｜DSML｜｜parameter name="FIND">- Код — Python 3.13+, пакет в `src/absorbent/`, каждый этап — отдельный
   модуль (`extract.py`, `dedup.py`, `transcribe.py`, `describe.py`,
   `synthesize.py`), оркестрация — в `pipeline.py`.
 - Соглашения по комментариям и коммитам — в `AGENTS.md`.
+- Отложенные идеи — в `BACKLOG.md`.
+- Тесты: `uv run pytest --cov` (111 тестов; покрытие ветвей 100%, порог
+  задан в `pyproject.toml` через `fail_under = 100`). Интеграционный тест
+  требует ffmpeg/ffprobe в PATH и пропускается без них.
 - Отложенные идеи — в `BACKLOG.md`.
