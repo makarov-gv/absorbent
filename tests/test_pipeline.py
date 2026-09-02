@@ -1,0 +1,245 @@
+"""Тесты оркестрации конвейера: порядок этапов, кэш, skip-флаги, force."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from absorbent.config import load_config
+from absorbent.pipeline import _detected_language, _load_json, process_file
+
+
+@pytest.fixture
+def cfg(minimal_config: Path):
+    return load_config(str(minimal_config))
+
+
+@pytest.fixture
+def fake_stages(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Подменяет функции этапов записывающими заглушками."""
+    import absorbent.pipeline as pipeline_module
+
+    state: dict = {"calls": []}
+
+    def _extract(input_path, frames_dir, fps, force=False):
+        state["calls"].append("extract")
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        for i in range(3):
+            (frames_dir / f"frame_{i+1:06d}.jpg").write_bytes(b"jpeg")
+        return sorted(frames_dir.glob("frame_*.jpg"))
+
+    def _dedup(frames, images_dir, fps, threshold):
+        state["calls"].append(f"dedup:{threshold}")
+        images_dir.mkdir(parents=True, exist_ok=True)
+        (images_dir / "frame_00_00_00.jpg").write_bytes(b"jpeg")
+        return [{"image": "frame_00_00_00.jpg", "seconds": 0.0, "timestamp": "00:00:00"}]
+
+    def _run_stt(spec, provider, input_path, language, out_json, force=False):
+        state["calls"].append(f"stt:{language}")
+        out_json.write_text(json.dumps([{"start": 0.0, "end": 1.0, "text": "привет",
+                                         "speaker": None}]), encoding="utf-8")
+        out_json.with_name("language.txt").write_text("ru", encoding="utf-8")
+        return "ru"
+
+    def _describe(vision_spec, provider, keyframes, transcript, images_dir, language, out_json,
+                  detected_language=None, force=False):
+        state["calls"].append(f"describe:{len(keyframes)}")
+        data = {kf["image"]: {"timestamp": kf["timestamp"], "description": f"кадр {kf['image']}"}
+                for kf in keyframes}
+        out_json.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        return data
+
+    def _synthesize(llm_spec, provider, transcript, descriptions, language, out_md,
+                    detected_language=None):
+        state["calls"].append(f"synthesize:{len(descriptions)}")
+        out_md.parent.mkdir(parents=True, exist_ok=True)
+        out_md.write_text("# Конспект\n", encoding="utf-8")
+        return out_md
+
+    monkeypatch.setattr(pipeline_module, "extract_frames", _extract)
+    monkeypatch.setattr(pipeline_module, "dedup_frames", _dedup)
+    monkeypatch.setattr(pipeline_module, "run_stt", _run_stt)
+    monkeypatch.setattr(pipeline_module, "describe_keyframes", _describe)
+    monkeypatch.setattr(pipeline_module, "run_synthesize", _synthesize)
+    state["module"] = pipeline_module
+    return state
+
+
+def _input(tmp_path: Path, name: str = "Лекция.mkv") -> Path:
+    path = tmp_path / name
+    path.write_bytes(b"media")
+    return path
+
+
+class TestProcessFile:
+    def test_full_pipeline_layout_and_stages(self, tmp_path: Path, cfg, fake_stages: dict,
+                                             args_namespace) -> None:
+        input_path = _input(tmp_path)
+        notes = process_file(input_path, cfg, args_namespace)
+        # Раскладка по умолчанию: <stem>/ рядом с входом.
+        out_dir = tmp_path / "Лекция"
+        assert notes == out_dir / "notes.md"
+        assert notes.exists() and notes.read_text(encoding="utf-8") == "# Конспект\n"
+        assert (out_dir / "images" / "frame_00_00_00.jpg").exists()
+        assert (out_dir / ".absorbent" / "frames").is_dir()
+        for name in ("keyframes.json", "transcript.json", "descriptions.json"):
+            assert (out_dir / ".absorbent" / name).exists()
+        # Порядок этапов.
+        assert fake_stages["calls"] == [
+            "extract", "dedup:10", "stt:auto", "describe:1", "synthesize:1",
+        ]
+
+    def test_custom_output_dir_and_language(self, tmp_path: Path, cfg, fake_stages: dict,
+                                            args_namespace) -> None:
+        args_namespace.output_dir = str(tmp_path / "custom")
+        args_namespace.language = "en"
+        input_path = _input(tmp_path)
+        process_file(input_path, cfg, args_namespace)
+        assert (tmp_path / "custom" / "notes.md").exists()
+        assert "stt:en" in fake_stages["calls"]
+        assert (tmp_path / "custom" / ".absorbent" / "language.txt").read_text(encoding="utf-8") == "ru"
+
+    def test_second_run_reuses_cache(self, tmp_path: Path, cfg, fake_stages: dict,
+                                     args_namespace) -> None:
+        input_path = _input(tmp_path)
+        process_file(input_path, cfg, args_namespace)
+        fake_stages["calls"].clear()
+        process_file(input_path, cfg, args_namespace)
+        # Без force дедупликация пропускается (есть keyframes.json), а
+        # extract_frames/run_stt вызываются, но возвращают кэш внутри.
+        assert fake_stages["calls"] == ["extract", "stt:auto", "describe:1", "synthesize:1"]
+
+    def test_force_reruns_all(self, tmp_path: Path, cfg, fake_stages: dict, args_namespace) -> None:
+        args_namespace.force = True
+        input_path = _input(tmp_path)
+        process_file(input_path, cfg, args_namespace)
+        assert fake_stages["calls"] == ["extract", "dedup:10", "stt:auto", "describe:1",
+                                        "synthesize:1"]
+
+    def test_skip_all_flags(self, tmp_path: Path, cfg, fake_stages: dict, args_namespace) -> None:
+        args_namespace.skip_stt = True
+        args_namespace.skip_frames = True
+        args_namespace.skip_describe = True
+        args_namespace.skip_synthesize = True
+        input_path = _input(tmp_path)
+        notes = process_file(input_path, cfg, args_namespace)
+        assert fake_stages["calls"] == []
+        # Каталоги созданы, notes.md отсутствует.
+        assert notes == tmp_path / "Лекция" / "notes.md"
+        assert not notes.exists()
+
+    def test_skip_stt_uses_cached_language(self, tmp_path: Path, cfg, fake_stages: dict,
+                                           args_namespace) -> None:
+        # Сначала полный прогон (кэширует language.txt), затем --skip-stt.
+        input_path = _input(tmp_path)
+        process_file(input_path, cfg, args_namespace)
+        fake_stages["calls"].clear()
+        args_namespace.skip_stt = True
+        process_file(input_path, cfg, args_namespace)
+        assert not any(c.startswith("stt:") for c in fake_stages["calls"])
+        # Describe получил детектированный язык из кэша.
+        assert "describe:1" in fake_stages["calls"]
+
+    def test_skip_frames_with_cached_keyframes(self, tmp_path: Path, cfg, fake_stages: dict,
+                                               args_namespace) -> None:
+        # Второй прогон без извлечения, но с кэшем keyframes.json: describe всё
+        # равно получает кадры из кэша.
+        input_path = _input(tmp_path)
+        process_file(input_path, cfg, args_namespace)
+        fake_stages["calls"].clear()
+        args_namespace.skip_frames = True
+        process_file(input_path, cfg, args_namespace)
+        # Кадры не извлекаются; keyframes.json при этом не читается (skip),
+        # поэтому describe не запускается, а готовые описания берутся из кэша.
+        assert fake_stages["calls"] == ["stt:auto", "synthesize:1"]
+
+    def test_hash_threshold_passed(self, tmp_path: Path, cfg, fake_stages: dict,
+                                   args_namespace) -> None:
+        args_namespace.hash_threshold = 20
+        args_namespace.force = True
+        input_path = _input(tmp_path)
+        process_file(input_path, cfg, args_namespace)
+        assert "dedup:20" in fake_stages["calls"]
+
+
+class TestHelpers:
+    def test_load_json_missing_returns_empty_list(self, tmp_path: Path) -> None:
+        assert _load_json(tmp_path / "nope.json") == []
+
+    def test_load_json_existing(self, tmp_path: Path) -> None:
+        path = tmp_path / "data.json"
+        path.write_text('[{"a": 1}]', encoding="utf-8")
+        assert _load_json(path) == [{"a": 1}]
+
+    def test_detected_language_reads_cache(self, tmp_path: Path) -> None:
+        transcript = tmp_path / "transcript.json"
+        transcript.with_name("language.txt").write_text("ru\n", encoding="utf-8")
+        assert _detected_language(transcript) == "ru"
+
+    def test_detected_language_empty_cache(self, tmp_path: Path) -> None:
+        assert _detected_language(tmp_path / "transcript.json") is None
+        transcript = tmp_path / "transcript.json"
+        transcript.with_name("language.txt").write_text("  \n", encoding="utf-8")
+        assert _detected_language(transcript) is None
+
+
+    def test_describe_from_list_cache_resets(self, tmp_path: Path, cfg, fake_stages: dict,
+                                             args_namespace) -> None:
+        """Сломанный (списочный) descriptions.json при пустых кадрах -> {}."""
+        import absorbent.pipeline as pipeline_module
+
+        # Перехватываем синтез, чтобы проверить, какие описания туда доехали.
+        seen: dict = {}
+
+        def _synthesize(llm_spec, provider, transcript, descriptions, language, out_md,
+                        detected_language=None):
+            seen["descriptions"] = descriptions
+            out_md.parent.mkdir(parents=True, exist_ok=True)
+            out_md.write_text("x", encoding="utf-8")
+            return out_md
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(pipeline_module, "run_stt", lambda *a, **k: None)  # noqa: E731
+        monkeypatch.setattr(pipeline_module, "run_synthesize", _synthesize)
+        out_dir = tmp_path / "Лекция"
+        cache = out_dir / ".absorbent"
+        cache.mkdir(parents=True)
+        # Кэш кадров пуст, а descriptions.json — список (не словарь) -> сброс в {}.
+        (cache / "descriptions.json").write_text("[]", encoding="utf-8")
+        # skip_frames -> keyframes остаются пустыми; skip_describe=False,
+        # поэтому отрабатывает ветка «кадров нет, читаем кэш описаний».
+        args_namespace.skip_frames = True
+        input_path = _input(tmp_path)
+        process_file(input_path, cfg, args_namespace)
+        assert seen["descriptions"] == {}
+        monkeypatch.undo()
+
+    def test_skip_describe_loads_existing_descriptions(self, tmp_path: Path, cfg,
+                                                       fake_stages: dict, args_namespace) -> None:
+        """--skip-describe: готовые описания читаются из кэша и уходят в синтез."""
+        import absorbent.pipeline as pipeline_module
+
+        seen: dict = {}
+
+        def _synthesize(llm_spec, provider, transcript, descriptions, language, out_md,
+                        detected_language=None):
+            seen["descriptions"] = descriptions
+            out_md.parent.mkdir(parents=True, exist_ok=True)
+            out_md.write_text("x", encoding="utf-8")
+            return out_md
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(pipeline_module, "run_stt", lambda *a, **k: None)  # noqa: E731
+        monkeypatch.setattr(pipeline_module, "run_synthesize", _synthesize)
+        out_dir = tmp_path / "Лекция"
+        cache = out_dir / ".absorbent"
+        cache.mkdir(parents=True)
+        (cache / "descriptions.json").write_text(
+            json.dumps({"f.jpg": {"timestamp": "00:00:00", "description": "d"}}), encoding="utf-8")
+        args_namespace.skip_describe = True
+        input_path = _input(tmp_path)
+        process_file(input_path, cfg, args_namespace)
+        assert seen["descriptions"] == {"f.jpg": {"timestamp": "00:00:00", "description": "d"}}
+        monkeypatch.undo()
