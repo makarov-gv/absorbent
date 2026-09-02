@@ -1,0 +1,40 @@
+providers:
+  deepseek:
+    base_url: https://api.deepseek.com
+    api_key_env: DEEPSEEK_API_KEY
+  llama-swap:
+    base_url: http://127.0.0.1:12434/v1
+    api_key_env: ""            # empty string or missing key -> no Authorization header
+  mistral:
+    base_url: https://api.mistral.ai/v1
+    api_key_env: MISTRAL_API_KEY
+
+stt:
+  whisper-turbo:
+    backend: whisper
+    whisper_model: turbo
+    default: true
+  voxtral-transcribe-2:
+    backend: voxtral
+    provider: mistral
+    model: voxtral-mini-transcribe-2
+
+vision:
+  deepseek-v4-flash-vision-exp:
+    provider: deepseek
+    default: true
+  gemma4-26b-vision:
+    provider: llama-swap
+  qwen3.8-27B:
+    provider: llama-swap
+
+llm:
+  deepseek-v4-flash:
+    provider: deepseek
+    default: true
+  deepseek-v4-pro:
+    provider: deepseek
+  gemma4-26b:
+    provider: llama-swap
+  qwen3.8-27B:
+    provider: llama-swap
