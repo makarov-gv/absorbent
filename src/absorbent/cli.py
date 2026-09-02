@@ -29,7 +29,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--language",
         choices=("ru", "en", "auto"),
         default="auto",
-        help="язык лекции: ru, en или автоопределение (по умолчанию auto)",
+        help="подсказка языка для распознавания речи: ru, en или auto "
+             "(по умолчанию auto; ru/en форсируют весь файл как один язык)",
+    )
+    parser.add_argument(
+        "--output-language",
+        choices=("ru", "en"),
+        default="ru",
+        help="язык итогового конспекта и промптов описания: ru или en (по умолчанию ru)",
     )
     parser.add_argument("--fps", type=float, default=1.0, metavar="N", help="частота извлечения кадров (по умолчанию 1)")
     parser.add_argument(

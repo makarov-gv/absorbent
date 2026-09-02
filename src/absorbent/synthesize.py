@@ -10,6 +10,8 @@ SYSTEM_PROMPTS: dict[str, str] = {
     "ru": (
         "Ты составляешь качественный структурированный конспект лекции в Markdown. На вход: "
         "полный транскрипт с таймкодами и список ключевых кадров (имя файла, таймкод, описание). "
+        "Пиши весь конспект на русском языке, но дословные фразы и термины из транскрипта, "
+        "произнесённые на другом языке (например, английском), сохраняй как есть, не переводя. "
         "Составь полный Markdown: заголовок, разделы, таблицы где уместно, формулы в LaTeX "
         "($...$), хронологический порядок. Вставляй изображения только ссылкой вида "
         "![подпись](images/<имя_файла>) ровно с теми именами файлов, что даны в списке кадров, "
@@ -19,12 +21,19 @@ SYSTEM_PROMPTS: dict[str, str] = {
     "en": (
         "You write a high-quality structured Markdown summary of a lecture. Input: the full "
         "transcript with timestamps, and a list of keyframes (filename, timestamp, description). "
+        "Write the whole summary in English, but keep verbatim phrases and terms from the "
+        "transcript spoken in another language (e.g. Russian) as they are, without translating. "
         "Produce complete Markdown: title, sections, tables where useful, LaTeX formulas "
         "($...$), chronological order. Embed images only as ![caption](images/<filename>) using "
         "exactly the filenames given in the keyframe list, where a frame illustrates the point. "
         "Image files already exist under images/. Do not invent filenames."
     ),
 }
+
+
+def _prompt_language(output_language: str) -> str:
+    """Язык промпта синтеза: всегда явный (ru/en), с запасом на 'ru'."""
+    return output_language if output_language in SYSTEM_PROMPTS else "ru"
 
 
 def _render_transcript(transcript: list[dict]) -> str:
@@ -53,13 +62,16 @@ def _render_keyframes(descriptions: dict) -> str:
 
 
 def run_synthesize(llm_spec: ModelSpec, provider: Provider, transcript: list[dict],
-                   descriptions: dict, language: str, out_md: Path,
-                   detected_language: str | None = None) -> Path:
-    """Синтезировать notes.md из транскрипта и описаний кадров; вернуть путь файла."""
+                   descriptions: dict, output_language: str, out_md: Path) -> Path:
+    """Синтезировать notes.md из транскрипта и описаний кадров; вернуть путь файла.
+
+    Язык конспекта задаётся явно (output_language: ru/en). Дословные RU/EN-
+    фразы из транскрипта модель сохраняет в исходном языке; язык выбирает
+    только наш промпт, а не каприз модели.
+    """
     from openai import OpenAI
 
-    lang = language if language != "auto" else (detected_language or "ru")
-    system_prompt = SYSTEM_PROMPTS.get(lang, SYSTEM_PROMPTS["en"])
+    system_prompt = SYSTEM_PROMPTS[_prompt_language(output_language)]
 
     user_message = (
         "Транскрипт лекции:\n"

@@ -17,24 +17,24 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "Ты извлекаешь содержимое слайда из кадра скринкаста лекции. На вход: изображение кадра, "
         "его таймкод и фрагмент транскрипта вокруг этого момента. Опиши, что показано на "
         "слайде/экране: суть, ключевые формулы в LaTeX ($...$), схемы и графики, важные термины. "
-        "Кратко (2–4 предложения или список), без воды. Верни только описание."
+        "Отвечай на русском языке, но дословные фразы из транскрипта и подписи со слайда "
+        "сохраняй в исходном языке. Кратко (2–4 предложения или список), без воды. Верни только "
+        "описание."
     ),
     "en": (
         "You extract slide content from a lecture screencast frame. Input: the frame image, its "
         "timestamp, and the transcript excerpt around that moment. Describe what is shown: the "
-        "point, key formulas in LaTeX ($...$), any diagrams/charts, and important terms. Be "
-        "concise (2–4 sentences or a bullet list), no filler. Return only the description."
+        "point, key formulas in LaTeX ($...$), any diagrams/charts, and important terms. Answer "
+        "in English, but keep verbatim transcript phrases and slide captions in their original "
+        "language. Be concise (2–4 sentences or a bullet list), no filler. Return only the "
+        "description."
     ),
 }
 
 
-def _prompt_language(language: str, detected: str | None) -> str:
-    """Язык промпта: явный язык, иначе детектированный, иначе 'ru'."""
-    if language != "auto":
-        return language
-    if detected and detected.startswith("en"):
-        return "en"
-    return "ru"
+def _prompt_language(output_language: str) -> str:
+    """Язык промпта описания: всегда явный (ru/en), без автоопределения."""
+    return output_language if output_language in SYSTEM_PROMPTS else "ru"
 
 
 def _transcript_window(transcript: list[dict], seconds: float) -> str:
@@ -83,13 +83,15 @@ def _describe_one(client, model_name: str, system_prompt: str, image_path: Path,
 
 
 def describe_keyframes(vision_spec: ModelSpec, provider: Provider, keyframes: list[dict],
-                       transcript: list[dict], images_dir: Path, language: str, out_json: Path,
-                       detected_language: str | None = None, force: bool = False) -> dict:
+                       transcript: list[dict], images_dir: Path, output_language: str,
+                       out_json: Path, force: bool = False) -> dict:
     """Описать каждый ключевой кадр; вернуть и записать descriptions.json.
 
     Формат: {"frame_HH_MM_SS.jpg": {"timestamp": "HH:MM:SS", "description": str}}.
-    Уже описанные кадры (без force) пропускаются. Ошибка API на кадре не
-    прерывает прогон: в описание пишется текст ошибки.
+    Язык описания задаётся явно (output_language: ru/en); дословные фразы из
+    транскрипта и подписи со слайда модель сохраняет в исходном языке. Уже
+    описанные кадры (без force) пропускаются. Ошибка API на кадре не прерывает
+    прогон: в описание пишется текст ошибки.
     """
     from openai import OpenAI
 
@@ -97,7 +99,7 @@ def describe_keyframes(vision_spec: ModelSpec, provider: Provider, keyframes: li
     if out_json.exists() and not force:
         descriptions = json.loads(out_json.read_text(encoding="utf-8"))
 
-    prompt_lang = _prompt_language(language, detected_language)
+    prompt_lang = _prompt_language(output_language)
     system_prompt = SYSTEM_PROMPTS[prompt_lang]
 
     api_key = api_key_from(provider)

@@ -82,8 +82,8 @@ def offline_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args_names
         out_json.with_name("language.txt").write_text("ru", encoding="utf-8")
         return "ru"
 
-    def _fake_describe(vision_spec, provider, keyframes, transcript, images_dir, language,
-                       out_json, detected_language=None, force=False):
+    def _fake_describe(vision_spec, provider, keyframes, transcript, images_dir, output_language,
+                       out_json, force=False):
         data = {
             kf["image"]: {"timestamp": kf["timestamp"], "description": f"слайд на {kf['timestamp']}"}
             for kf in keyframes
@@ -91,8 +91,7 @@ def offline_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args_names
         out_json.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         return data
 
-    def _fake_synthesize(llm_spec, provider, transcript, descriptions, language, out_md,
-                         detected_language=None):
+    def _fake_synthesize(llm_spec, provider, transcript, descriptions, output_language, out_md):
         # Реалистичный Markdown: подпись + ссылка на каждый кадр (по контракту
         # имена берутся только из списка описаний).
         parts = ["# Конспект интеграционного теста\n"]

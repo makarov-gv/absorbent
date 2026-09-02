@@ -7,13 +7,23 @@ from pathlib import Path
 import pytest
 
 from absorbent.config import ModelSpec, Provider
-from absorbent.synthesize import _render_keyframes, _render_transcript, run_synthesize
+from absorbent.synthesize import _prompt_language, _render_keyframes, _render_transcript, run_synthesize
 
 LLM_SPEC = ModelSpec(name="llm-a", provider="p", default=True)
 
 
 def _provider(api_key_env: str = "TEST_KEY_A") -> Provider:
     return Provider(name="p", base_url="https://api.example.test/v1", api_key_env=api_key_env)
+
+
+class TestPromptLanguage:
+    def test_explicit_language_used(self) -> None:
+        assert _prompt_language("ru") == "ru"
+        assert _prompt_language("en") == "en"
+
+    def test_unknown_falls_back_ru(self) -> None:
+        # Язык конспекта всегда явный: неизвестное значение -> запас на 'ru'.
+        assert _prompt_language("fr") == "ru"
 
 
 class TestRenderTranscript:
@@ -69,14 +79,24 @@ class TestRunSynthesize:
         assert "[00:00] тезис" in messages[1]["content"]
         assert call["model"] == "llm-a"
 
-    def test_en_prompt_via_detected_language(self, tmp_path: Path, fake_openai,
-                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_en_prompt_explicit_language(self, tmp_path: Path, fake_openai,
+                                         monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("TEST_KEY_A", "k")
         fake_openai.set_replies(["ok"])
-        run_synthesize(LLM_SPEC, _provider(), [], {}, "auto", tmp_path / "notes.md",
-                       detected_language="en")
+        run_synthesize(LLM_SPEC, _provider(), [], {}, "en", tmp_path / "notes.md")
         system = fake_openai.chat.completions.calls[0]["messages"][0]["content"]
         assert "structured Markdown summary" in system
+
+    def test_ru_prompt_preserves_verbatim_quotes(self, tmp_path: Path, fake_openai,
+                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+        # Русский промпт велит писать по-русски, сохраняя дословные фразы
+        # на другом языке (английском) без перевода.
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        fake_openai.set_replies(["ок"])
+        run_synthesize(LLM_SPEC, _provider(), [], {}, "ru", tmp_path / "notes.md")
+        system = fake_openai.chat.completions.calls[0]["messages"][0]["content"]
+        assert "Пиши весь конспект на русском языке" in system
+        assert "сохраняй как есть" in system
 
     def test_unavailable_transcript_passed(self, tmp_path: Path, fake_openai,
                                            monkeypatch: pytest.MonkeyPatch) -> None:

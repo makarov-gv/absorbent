@@ -47,6 +47,7 @@ class TestParser:
         parser = build_parser()
         args = parser.parse_args(["in.mp4"])
         assert args.language == "auto"
+        assert args.output_language == "ru"
         assert args.fps == 1.0
         assert args.hash_threshold == 10
         assert args.output_dir is None
@@ -59,17 +60,23 @@ class TestParser:
         parser = build_parser()
         args = parser.parse_args([
             "in.mkv", "--config", "c.yaml", "--stt", "x", "--vision-model", "v",
-            "--llm-model", "l", "--language", "ru", "--fps", "2", "--hash-threshold", "5",
+            "--llm-model", "l", "--language", "ru", "--output-language", "en",
+            "--fps", "2", "--hash-threshold", "5",
             "--output-dir", "out", "--force", "--skip-stt", "--skip-frames",
             "--skip-describe", "--skip-synthesize",
         ])
-        assert args.language == "ru" and args.fps == 2.0 and args.hash_threshold == 5
+        assert args.language == "ru" and args.output_language == "en"
+        assert args.fps == 2.0 and args.hash_threshold == 5
         assert args.stt == "x" and args.output_dir == "out" and args.force is True
         assert args.skip_describe is True and args.skip_synthesize is True
 
     def test_bad_language_rejected(self) -> None:
         with pytest.raises(SystemExit):
             build_parser().parse_args(["in.mp4", "--language", "fr"])
+
+    def test_bad_output_language_rejected(self) -> None:
+        with pytest.raises(SystemExit):
+            build_parser().parse_args(["in.mp4", "--output-language", "fr"])
 
     def test_missing_input_exits_2(self, capsys: pytest.CaptureFixture) -> None:
         with pytest.raises(SystemExit) as exc:

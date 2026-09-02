@@ -25,21 +25,17 @@ def _load_json(path: Path) -> list | dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _detected_language(transcript_path: Path) -> str | None:
-    """Детектированный язык из кэша STT (если есть)."""
-    lang_file = transcript_path.with_name("language.txt")
-    if lang_file.exists():
-        value = lang_file.read_text(encoding="utf-8").strip()
-        return value or None
-    return None
-
-
 def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Path:
     """Прогнать все этапы конвейера для одного файла; вернуть путь notes.md.
 
     Порядок этапов: извлечение кадров -> дедупликация -> распознавание речи
     -> описание кадров -> синтез Markdown. Каждый этап уважает свой
     `--skip-*` флаг и кэш в `.absorbent/` (обход кэша — `--force`).
+
+    Язык распознавания речи (`--language`) и язык результата
+    (`--output-language`) — независимые оси: первый лишь подсказывает whisper
+    (для двуязычных лекций всегда 'auto'), второй явно задаёт язык промптов
+    описания и синтеза (по умолчанию 'ru').
     """
     stem = input_path.stem
     if args.output_dir:
@@ -57,6 +53,8 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
     descriptions_path = cache / "descriptions.json"
     notes_path = output_dir / "notes.md"
 
+    output_language = getattr(args, "output_language", "ru")
+
     print(f"[{stem}] извлечение кадров...")
     keyframes: list[dict] = []
     if not args.skip_frames:
@@ -69,13 +67,10 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
             keyframes = json.loads(keyframes_path.read_text(encoding="utf-8"))
 
     print(f"[{stem}] распознавание речи...")
-    detected_language: str | None = None
     if not args.skip_stt:
         stt_provider, stt_spec = cfg.resolve("stt", args.stt)
-        detected_language = run_stt(stt_spec, stt_provider, input_path, args.language,
-                                    transcript_path, force=args.force)
-    else:
-        detected_language = _detected_language(transcript_path)
+        run_stt(stt_spec, stt_provider, input_path, args.language, transcript_path,
+                force=args.force)
     transcript = _load_json(transcript_path)
 
     descriptions: dict = {}
@@ -84,8 +79,7 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
         if keyframes:
             vision_provider, vision_spec = cfg.resolve("vision", args.vision_model)
             descriptions = describe_keyframes(vision_spec, vision_provider, keyframes, transcript,
-                                              images_dir, args.language, descriptions_path,
-                                              detected_language=detected_language,
+                                              images_dir, output_language, descriptions_path,
                                               force=args.force)
         else:
             descriptions = _load_json(descriptions_path)
@@ -98,7 +92,7 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
     if not args.skip_synthesize:
         print(f"[{stem}] синтез Markdown...")
         llm_provider, llm_spec = cfg.resolve("llm", args.llm_model)
-        run_synthesize(llm_spec, llm_provider, transcript, descriptions, args.language, notes_path,
-                       detected_language=detected_language)
+        run_synthesize(llm_spec, llm_provider, transcript, descriptions, output_language,
+                       notes_path)
         print(f"[{stem}] готово: {notes_path}")
     return notes_path

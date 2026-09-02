@@ -31,18 +31,13 @@ def _make_image(images_dir: Path, name: str) -> Path:
 
 
 class TestPromptLanguage:
-    def test_explicit_wins(self) -> None:
-        assert _prompt_language("ru", "en") == "ru"
-        assert _prompt_language("en", None) == "en"
+    def test_explicit_language_used(self) -> None:
+        assert _prompt_language("ru") == "ru"
+        assert _prompt_language("en") == "en"
 
-    def test_auto_uses_detected_en(self) -> None:
-        assert _prompt_language("auto", "en") == "en"
-        assert _prompt_language("auto", "en-US") == "en"
-
-    def test_auto_ru_default(self) -> None:
-        assert _prompt_language("auto", "ru") == "ru"
-        assert _prompt_language("auto", None) == "ru"
-        assert _prompt_language("auto", "de") == "ru"  # не-en -> ru.
+    def test_unknown_falls_back_ru(self) -> None:
+        # Язык промпта всегда явный: неизвестное значение -> запас на 'ru'.
+        assert _prompt_language("de") == "ru"
 
 
 class TestTranscriptWindow:
@@ -146,17 +141,17 @@ class TestDescribeKeyframes:
         system = fake_openai.chat.completions.calls[0]["messages"][0]["content"]
         assert "screencast frame" in system
 
-    def test_detected_language_auto(self, tmp_path: Path, fake_openai,
-                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_unknown_output_language_falls_back_ru(self, tmp_path: Path, fake_openai,
+                                                   monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("TEST_KEY_A", "k")
         _, images_dir = self._setup(tmp_path)
-        fake_openai.set_replies(["description"])
+        fake_openai.set_replies(["описание"])
         keyframes = [self._frame(0.0)]
-        # auto + детектирован en -> английский промпт.
-        describe_keyframes(VISION_SPEC, _provider(), keyframes, [], images_dir, "auto",
-                           tmp_path / "descriptions.json", detected_language="en")
+        # Неизвестный язык -> запас на русский промпт (никогда не авто/детект).
+        describe_keyframes(VISION_SPEC, _provider(), keyframes, [], images_dir, "xx",
+                           tmp_path / "descriptions.json")
         system = fake_openai.chat.completions.calls[0]["messages"][0]["content"]
-        assert "screencast frame" in system
+        assert "извлекаешь содержимое слайда" in system
 
     def test_skips_existing_without_force(self, tmp_path: Path, fake_openai,
                                           monkeypatch: pytest.MonkeyPatch) -> None:

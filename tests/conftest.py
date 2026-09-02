@@ -203,6 +203,7 @@ def args_namespace() -> object:
         skip_describe=False,
         skip_synthesize=False,
         language="auto",
+        output_language="ru",
         stt=None,
         vision_model=None,
         llm_model=None,

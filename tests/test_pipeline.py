@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from absorbent.config import load_config
-from absorbent.pipeline import _detected_language, _load_json, process_file
+from absorbent.pipeline import _load_json, process_file
 
 
 @pytest.fixture
@@ -43,17 +43,16 @@ def fake_stages(monkeypatch: pytest.MonkeyPatch) -> dict:
         out_json.with_name("language.txt").write_text("ru", encoding="utf-8")
         return "ru"
 
-    def _describe(vision_spec, provider, keyframes, transcript, images_dir, language, out_json,
-                  detected_language=None, force=False):
-        state["calls"].append(f"describe:{len(keyframes)}")
+    def _describe(vision_spec, provider, keyframes, transcript, images_dir, output_language,
+                  out_json, force=False):
+        state["calls"].append(f"describe:{output_language}:{len(keyframes)}")
         data = {kf["image"]: {"timestamp": kf["timestamp"], "description": f"кадр {kf['image']}"}
                 for kf in keyframes}
         out_json.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         return data
 
-    def _synthesize(llm_spec, provider, transcript, descriptions, language, out_md,
-                    detected_language=None):
-        state["calls"].append(f"synthesize:{len(descriptions)}")
+    def _synthesize(llm_spec, provider, transcript, descriptions, output_language, out_md):
+        state["calls"].append(f"synthesize:{output_language}:{len(descriptions)}")
         out_md.parent.mkdir(parents=True, exist_ok=True)
         out_md.write_text("# Конспект\n", encoding="utf-8")
         return out_md
@@ -86,19 +85,22 @@ class TestProcessFile:
         assert (out_dir / ".absorbent" / "frames").is_dir()
         for name in ("keyframes.json", "transcript.json", "descriptions.json"):
             assert (out_dir / ".absorbent" / name).exists()
-        # Порядок этапов.
+        # Порядок этапов: язык речи (auto) и язык результата (ru) независимы.
         assert fake_stages["calls"] == [
-            "extract", "dedup:10", "stt:auto", "describe:1", "synthesize:1",
+            "extract", "dedup:10", "stt:auto", "describe:ru:1", "synthesize:ru:1",
         ]
 
-    def test_custom_output_dir_and_language(self, tmp_path: Path, cfg, fake_stages: dict,
-                                            args_namespace) -> None:
+    def test_custom_output_dir_and_languages(self, tmp_path: Path, cfg, fake_stages: dict,
+                                             args_namespace) -> None:
         args_namespace.output_dir = str(tmp_path / "custom")
-        args_namespace.language = "en"
+        args_namespace.language = "en"  # подсказка whisper.
+        args_namespace.output_language = "en"  # язык конспекта.
         input_path = _input(tmp_path)
         process_file(input_path, cfg, args_namespace)
         assert (tmp_path / "custom" / "notes.md").exists()
         assert "stt:en" in fake_stages["calls"]
+        assert "describe:en:1" in fake_stages["calls"]
+        assert "synthesize:en:1" in fake_stages["calls"]
         assert (tmp_path / "custom" / ".absorbent" / "language.txt").read_text(encoding="utf-8") == "ru"
 
     def test_second_run_reuses_cache(self, tmp_path: Path, cfg, fake_stages: dict,
@@ -109,14 +111,14 @@ class TestProcessFile:
         process_file(input_path, cfg, args_namespace)
         # Без force дедупликация пропускается (есть keyframes.json), а
         # extract_frames/run_stt вызываются, но возвращают кэш внутри.
-        assert fake_stages["calls"] == ["extract", "stt:auto", "describe:1", "synthesize:1"]
+        assert fake_stages["calls"] == ["extract", "stt:auto", "describe:ru:1", "synthesize:ru:1"]
 
     def test_force_reruns_all(self, tmp_path: Path, cfg, fake_stages: dict, args_namespace) -> None:
         args_namespace.force = True
         input_path = _input(tmp_path)
         process_file(input_path, cfg, args_namespace)
-        assert fake_stages["calls"] == ["extract", "dedup:10", "stt:auto", "describe:1",
-                                        "synthesize:1"]
+        assert fake_stages["calls"] == ["extract", "dedup:10", "stt:auto", "describe:ru:1",
+                                        "synthesize:ru:1"]
 
     def test_skip_all_flags(self, tmp_path: Path, cfg, fake_stages: dict, args_namespace) -> None:
         args_namespace.skip_stt = True
@@ -130,17 +132,18 @@ class TestProcessFile:
         assert notes == tmp_path / "Лекция" / "notes.md"
         assert not notes.exists()
 
-    def test_skip_stt_uses_cached_language(self, tmp_path: Path, cfg, fake_stages: dict,
-                                           args_namespace) -> None:
-        # Сначала полный прогон (кэширует language.txt), затем --skip-stt.
+    def test_skip_stt_still_synthesizes(self, tmp_path: Path, cfg, fake_stages: dict,
+                                        args_namespace) -> None:
+        # Первый прогон кэширует transcript.json, затем --skip-stt: синтез
+        # работает по кэшу транскрипта, язык результата не зависит от STT.
         input_path = _input(tmp_path)
         process_file(input_path, cfg, args_namespace)
         fake_stages["calls"].clear()
         args_namespace.skip_stt = True
         process_file(input_path, cfg, args_namespace)
         assert not any(c.startswith("stt:") for c in fake_stages["calls"])
-        # Describe получил детектированный язык из кэша.
-        assert "describe:1" in fake_stages["calls"]
+        assert "describe:ru:1" in fake_stages["calls"]
+        assert "synthesize:ru:1" in fake_stages["calls"]
 
     def test_skip_frames_with_cached_keyframes(self, tmp_path: Path, cfg, fake_stages: dict,
                                                args_namespace) -> None:
@@ -153,7 +156,7 @@ class TestProcessFile:
         process_file(input_path, cfg, args_namespace)
         # Кадры не извлекаются; keyframes.json при этом не читается (skip),
         # поэтому describe не запускается, а готовые описания берутся из кэша.
-        assert fake_stages["calls"] == ["stt:auto", "synthesize:1"]
+        assert fake_stages["calls"] == ["stt:auto", "synthesize:ru:1"]
 
     def test_hash_threshold_passed(self, tmp_path: Path, cfg, fake_stages: dict,
                                    args_namespace) -> None:
@@ -173,18 +176,6 @@ class TestHelpers:
         path.write_text('[{"a": 1}]', encoding="utf-8")
         assert _load_json(path) == [{"a": 1}]
 
-    def test_detected_language_reads_cache(self, tmp_path: Path) -> None:
-        transcript = tmp_path / "transcript.json"
-        transcript.with_name("language.txt").write_text("ru\n", encoding="utf-8")
-        assert _detected_language(transcript) == "ru"
-
-    def test_detected_language_empty_cache(self, tmp_path: Path) -> None:
-        assert _detected_language(tmp_path / "transcript.json") is None
-        transcript = tmp_path / "transcript.json"
-        transcript.with_name("language.txt").write_text("  \n", encoding="utf-8")
-        assert _detected_language(transcript) is None
-
-
     def test_describe_from_list_cache_resets(self, tmp_path: Path, cfg, fake_stages: dict,
                                              args_namespace) -> None:
         """Сломанный (списочный) descriptions.json при пустых кадрах -> {}."""
@@ -193,8 +184,7 @@ class TestHelpers:
         # Перехватываем синтез, чтобы проверить, какие описания туда доехали.
         seen: dict = {}
 
-        def _synthesize(llm_spec, provider, transcript, descriptions, language, out_md,
-                        detected_language=None):
+        def _synthesize(llm_spec, provider, transcript, descriptions, output_language, out_md):
             seen["descriptions"] = descriptions
             out_md.parent.mkdir(parents=True, exist_ok=True)
             out_md.write_text("x", encoding="utf-8")
@@ -223,8 +213,7 @@ class TestHelpers:
 
         seen: dict = {}
 
-        def _synthesize(llm_spec, provider, transcript, descriptions, language, out_md,
-                        detected_language=None):
+        def _synthesize(llm_spec, provider, transcript, descriptions, output_language, out_md):
             seen["descriptions"] = descriptions
             out_md.parent.mkdir(parents=True, exist_ok=True)
             out_md.write_text("x", encoding="utf-8")
