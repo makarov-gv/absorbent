@@ -17,7 +17,7 @@ stt:
   voxtral-transcribe-2:
     backend: voxtral
     provider: mistral
-    model: voxtral-mini-transcribe-2
+    model: voxtral-mini-latest
 
 vision:
   deepseek-v4-flash-vision-exp:
