@@ -60,6 +60,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-frames", action="store_true", help="пропустить извлечение и дедупликацию кадров")
     parser.add_argument("--skip-describe", action="store_true", help="пропустить описание кадров")
     parser.add_argument("--skip-synthesize", action="store_true", help="пропустить синтез Markdown")
+    parser.add_argument("--skip-render", action="store_true",
+                        help="пропустить постпроцессинг: выравнивание таблиц, HTML, PDF")
     return parser
 
 

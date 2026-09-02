@@ -104,6 +104,7 @@ def offline_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args_names
     monkeypatch.setattr(pipeline_module, "run_stt", _fake_stt)
     monkeypatch.setattr(pipeline_module, "describe_keyframes", _fake_describe)
     monkeypatch.setattr(pipeline_module, "run_synthesize", _fake_synthesize)
+    monkeypatch.setattr(pipeline_module, "render_all", lambda notes_md: None)
     cfg = load_config(str(REPO_CONFIG))
     return video, out_dir, cfg, args_namespace
 

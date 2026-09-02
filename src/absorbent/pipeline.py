@@ -10,6 +10,7 @@ from absorbent.config import Config
 from absorbent.dedup import dedup_frames
 from absorbent.describe import describe_keyframes
 from absorbent.extract import extract_frames
+from absorbent.render import render_all
 from absorbent.synthesize import run_synthesize
 from absorbent.transcribe import run_stt
 
@@ -29,8 +30,10 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
     """Прогнать все этапы конвейера для одного файла; вернуть путь notes.md.
 
     Порядок этапов: извлечение кадров -> дедупликация -> распознавание речи
-    -> описание кадров -> синтез Markdown. Каждый этап уважает свой
-    `--skip-*` флаг и кэш в `.absorbent/` (обход кэша — `--force`).
+    -> описание кадров -> синтез Markdown -> постпроцессинг (таблицы,
+    HTML, PDF). Каждый этап уважает свой `--skip-*` флаг и кэш в
+    `.absorbent/` (обход кэша — `--force`); постпроцессинг отключается
+    флагом `--skip-render`.
 
     Язык распознавания речи (`--language`) и язык результата
     (`--output-language`) — независимые оси: первый лишь подсказывает whisper
@@ -94,5 +97,9 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
         llm_provider, llm_spec = cfg.resolve("llm", args.llm_model)
         run_synthesize(llm_spec, llm_provider, transcript, descriptions, output_language,
                        notes_path)
-        print(f"[{stem}] готово: {notes_path}")
+
+    if not getattr(args, "skip_render", False) and notes_path.exists():
+        print(f"[{stem}] постпроцессинг: таблицы, HTML, PDF...")
+        render_all(notes_path)
+        print(f"[{stem}] готово: {notes_path} (+ notes.html, notes.pdf)")
     return notes_path

@@ -53,6 +53,7 @@ class TestParser:
         assert args.output_dir is None
         assert args.force is False
         assert args.skip_stt is False and args.skip_synthesize is False
+        assert args.skip_render is False
         assert args.stt is None and args.vision_model is None and args.llm_model is None
         assert args.config is None
 
@@ -63,10 +64,11 @@ class TestParser:
             "--llm-model", "l", "--language", "ru", "--output-language", "en",
             "--fps", "2", "--hash-threshold", "5",
             "--output-dir", "out", "--force", "--skip-stt", "--skip-frames",
-            "--skip-describe", "--skip-synthesize",
+            "--skip-describe", "--skip-synthesize", "--skip-render",
         ])
         assert args.language == "ru" and args.output_language == "en"
         assert args.fps == 2.0 and args.hash_threshold == 5
+        assert args.skip_render is True
         assert args.stt == "x" and args.output_dir == "out" and args.force is True
         assert args.skip_describe is True and args.skip_synthesize is True
 

@@ -57,11 +57,16 @@ def fake_stages(monkeypatch: pytest.MonkeyPatch) -> dict:
         out_md.write_text("# Конспект\n", encoding="utf-8")
         return out_md
 
+    def _render(notes_md):
+        state["calls"].append("render")
+        return notes_md.with_name("notes.html"), notes_md.with_name("notes.pdf")
+
     monkeypatch.setattr(pipeline_module, "extract_frames", _extract)
     monkeypatch.setattr(pipeline_module, "dedup_frames", _dedup)
     monkeypatch.setattr(pipeline_module, "run_stt", _run_stt)
     monkeypatch.setattr(pipeline_module, "describe_keyframes", _describe)
     monkeypatch.setattr(pipeline_module, "run_synthesize", _synthesize)
+    monkeypatch.setattr(pipeline_module, "render_all", _render)
     state["module"] = pipeline_module
     return state
 
@@ -87,7 +92,7 @@ class TestProcessFile:
             assert (out_dir / ".absorbent" / name).exists()
         # Порядок этапов: язык речи (auto) и язык результата (ru) независимы.
         assert fake_stages["calls"] == [
-            "extract", "dedup:10", "stt:auto", "describe:ru:1", "synthesize:ru:1",
+            "extract", "dedup:10", "stt:auto", "describe:ru:1", "synthesize:ru:1", "render",
         ]
 
     def test_custom_output_dir_and_languages(self, tmp_path: Path, cfg, fake_stages: dict,
@@ -111,14 +116,15 @@ class TestProcessFile:
         process_file(input_path, cfg, args_namespace)
         # Без force дедупликация пропускается (есть keyframes.json), а
         # extract_frames/run_stt вызываются, но возвращают кэш внутри.
-        assert fake_stages["calls"] == ["extract", "stt:auto", "describe:ru:1", "synthesize:ru:1"]
+        assert fake_stages["calls"] == ["extract", "stt:auto", "describe:ru:1", "synthesize:ru:1",
+                                        "render"]
 
     def test_force_reruns_all(self, tmp_path: Path, cfg, fake_stages: dict, args_namespace) -> None:
         args_namespace.force = True
         input_path = _input(tmp_path)
         process_file(input_path, cfg, args_namespace)
         assert fake_stages["calls"] == ["extract", "dedup:10", "stt:auto", "describe:ru:1",
-                                        "synthesize:ru:1"]
+                                        "synthesize:ru:1", "render"]
 
     def test_skip_all_flags(self, tmp_path: Path, cfg, fake_stages: dict, args_namespace) -> None:
         args_namespace.skip_stt = True
@@ -156,7 +162,7 @@ class TestProcessFile:
         process_file(input_path, cfg, args_namespace)
         # Кадры не извлекаются; keyframes.json при этом не читается (skip),
         # поэтому describe не запускается, а готовые описания берутся из кэша.
-        assert fake_stages["calls"] == ["stt:auto", "synthesize:ru:1"]
+        assert fake_stages["calls"] == ["stt:auto", "synthesize:ru:1", "render"]
 
     def test_hash_threshold_passed(self, tmp_path: Path, cfg, fake_stages: dict,
                                    args_namespace) -> None:
@@ -165,6 +171,14 @@ class TestProcessFile:
         input_path = _input(tmp_path)
         process_file(input_path, cfg, args_namespace)
         assert "dedup:20" in fake_stages["calls"]
+
+    def test_skip_render_skips_postprocess(self, tmp_path: Path, cfg, fake_stages: dict,
+                                           args_namespace) -> None:
+        args_namespace.skip_render = True
+        input_path = _input(tmp_path)
+        process_file(input_path, cfg, args_namespace)
+        # Синтез отработал, но постпроцессинг не вызван.
+        assert "render" not in fake_stages["calls"]
 
 
 class TestHelpers:

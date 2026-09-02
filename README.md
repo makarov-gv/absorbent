@@ -18,7 +18,11 @@
    её таймкод и фрагмент транскрипта вокруг этого момента;
 5. текстовая LLM синтезирует полный Markdown-конспект по транскрипту и
    описаниям кадров, вставляя изображения `![подпись](images/frame_....jpg)`
-   ровно с теми именами файлов, что реально лежат на диске.
+   ровно с теми именами файлов, что реально лежат на диске;
+6. постпроцессинг: таблицы notes.md выравниваются скриптом
+   `fmt-md-tables`, затем pandoc собирает самодостаточный `notes.html`
+   (CSS-тема github-markdown, формулы MathML) и `notes.pdf` через движок
+   lualatex со шрифтами DejaVu.
 
 Провайдеры и модели задаются в одном YAML-файле; ключи API берутся из
 переменных окружения; конкретная модель каждого этапа выбирается флагом
@@ -29,6 +33,11 @@
 Требуется [uv](https://docs.astral.sh/uv/), `ffmpeg` и `ffprobe` в PATH
 (пакет `ffmpeg` в Arch Linux). CUDA-видеокарта необязательна — нужна только
 для локального Whisper; без неё Whisper работает на CPU медленнее.
+
+Для постпроцессинга (этап 6) нужны внешние инструменты:
+`fmt-md-tables` (выравнивание таблиц), `pandoc`, движок `lualatex` и
+шрифты DejaVu (кириллица). Без них конвейер работает до синтеза
+notes.md; HTML/PDF отключаются флагом `--skip-render`.
 
 ```bash
 uv sync
@@ -113,6 +122,7 @@ uv run absorbent lecture.mkv
 | `--skip-frames` | — | пропустить извлечение и дедупликацию кадров |
 | `--skip-describe` | — | пропустить описание кадров |
 | `--skip-synthesize` | — | пропустить синтез Markdown |
+| `--skip-render` | — | пропустить постпроцессинг (таблицы, HTML, PDF) |
 
 Неизвестное имя модели (`--stt`, `--vision-model`, `--llm-model`) печатает
 список допустимых имён в этой категории и завершается с кодом 2.
@@ -136,6 +146,8 @@ uv run absorbent lecture.mkv
 ```
 Lecture/
   notes.md                  # итоговый конспект Markdown
+  notes.html                # самодостаточный HTML (css и кадры встроены)
+  notes.pdf                 # PDF через lualatex
   images/                   # ключевые кадры, на которые ссылается notes.md
     frame_HH_MM_SS.jpg
   .absorbent/               # кэш промежуточных результатов
@@ -147,22 +159,31 @@ Lecture/
     descriptions.json       # описания кадров vision-моделью
 ```
 
-`notes.md` и `images/` — результат; всё под `.absorbent/` можно удалять без
-потери результата (кэш лишь ускоряет повторные прогоны).
+`notes.md`, `notes.html`, `notes.pdf` и `images/` — результат; всё под
+`.absorbent/` можно удалять без потери результата (кэш лишь ускоряет
+повторные прогоны).
 
-## Pandoc
+## Постпроцессинг
 
-```bash
-pandoc notes.md --embed-resources --standalone -o notes.html
-```
+После синтеза конвейер автоматически:
+1. выравнивает таблицы `notes.md` внешним скриптом `fmt-md-tables`;
+2. собирает самодостаточный `notes.html` через
+   `pandoc --standalone --embed-resources` — CSS-тема github-markdown
+   (файл в `src/absorbent/assets/github-markdown.css`, лицензия MIT,
+   sindresorhus), изображения встроены как data-URI, формулы — MathML;
+3. собирает `notes.pdf` через `pandoc --pdf-engine=lualatex` со шрифтами
+   DejaVu и полями 2 см; первый заголовок notes.md становится title.
+
+HTML/PDF можно отключить флагом `--skip-render` (например, когда pandoc
+или lualatex не установлены).
 
 ## Разработка
 <｜｜DSML｜｜parameter name="FIND">- Код — Python 3.13+, пакет в `src/absorbent/`, каждый этап — отдельный
   модуль (`extract.py`, `dedup.py`, `transcribe.py`, `describe.py`,
-  `synthesize.py`), оркестрация — в `pipeline.py`.
+  `synthesize.py`, `render.py`), оркестрация — в `pipeline.py`.
 - Соглашения по комментариям и коммитам — в `AGENTS.md`.
 - Отложенные идеи — в `BACKLOG.md`.
-- Тесты: `uv run pytest --cov` (111 тестов; покрытие ветвей 100%, порог
+- Тесты: `uv run pytest --cov` (125 тестов; покрытие ветвей 100%, порог
   задан в `pyproject.toml` через `fail_under = 100`). Интеграционный тест
   требует ffmpeg/ffprobe в PATH и пропускается без них.
 - Отложенные идеи — в `BACKLOG.md`.

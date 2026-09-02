@@ -202,6 +202,7 @@ def args_namespace() -> object:
         skip_frames=False,
         skip_describe=False,
         skip_synthesize=False,
+        skip_render=False,
         language="auto",
         output_language="ru",
         stt=None,
