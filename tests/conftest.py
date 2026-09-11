@@ -195,6 +195,7 @@ def args_namespace() -> object:
 
     return SimpleNamespace(
         output_dir=None,
+        flat=False,
         fps=1.0,
         hash_threshold=10,
         force=False,

@@ -14,9 +14,9 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "произнесённые на другом языке (например, английском), сохраняй как есть, не переводя. "
         "Составь полный Markdown: заголовок, разделы, таблицы где уместно, формулы в LaTeX "
         "($...$), хронологический порядок. Вставляй изображения только ссылкой вида "
-        "![подпись](images/<имя_файла>) ровно с теми именами файлов, что даны в списке кадров, "
-        "где кадр иллюстрирует мысль. Файлы изображений уже лежат в images/. Не выдумывай имена "
-        "файлов."
+        "![подпись]({images_prefix}<имя_файла>) ровно с теми именами файлов, что даны в списке "
+        "кадров, где кадр иллюстрирует мысль. Файлы изображений уже лежат в {images_prefix}, "
+        "а не в каком-либо другом каталоге. Не выдумывай имена файлов."
     ),
     "en": (
         "You write a high-quality structured Markdown summary of a lecture. Input: the full "
@@ -24,9 +24,10 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "Write the whole summary in English, but keep verbatim phrases and terms from the "
         "transcript spoken in another language (e.g. Russian) as they are, without translating. "
         "Produce complete Markdown: title, sections, tables where useful, LaTeX formulas "
-        "($...$), chronological order. Embed images only as ![caption](images/<filename>) using "
-        "exactly the filenames given in the keyframe list, where a frame illustrates the point. "
-        "Image files already exist under images/. Do not invent filenames."
+        "($...$), chronological order. Embed images only as ![caption]({images_prefix}<filename>) "
+        "using exactly the filenames given in the keyframe list, where a frame illustrates the "
+        "point. Image files already exist under {images_prefix}, not in any other directory. "
+        "Do not invent filenames."
     ),
 }
 
@@ -51,33 +52,37 @@ def _render_transcript(transcript: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _render_keyframes(descriptions: dict) -> str:
+def _render_keyframes(descriptions: dict, images_prefix: str) -> str:
     """Список ключевых кадров для модели: путь, таймкод, описание."""
     lines = []
     # Стабильный порядок по имени файла = хронологический.
     for name in sorted(descriptions):
         entry = descriptions[name]
-        lines.append(f"- images/{name} [{entry['timestamp']}]: {entry['description']}")
+        lines.append(f"- {images_prefix}{name} [{entry['timestamp']}]: {entry['description']}")
     return "\n".join(lines)
 
 
 def run_synthesize(llm_spec: ModelSpec, provider: Provider, transcript: list[dict],
-                   descriptions: dict, output_language: str, out_md: Path) -> Path:
+                   descriptions: dict, output_language: str, out_md: Path,
+                   images_prefix: str = "images/") -> Path:
     """Синтезировать notes.md из транскрипта и описаний кадров; вернуть путь файла.
 
     Язык конспекта задаётся явно (output_language: ru/en). Дословные RU/EN-
     фразы из транскрипта модель сохраняет в исходном языке; язык выбирает
-    только наш промпт, а не каприз модели.
+    только наш промпт, а не каприз модели. images_prefix — каталог картинок
+    относительно итогового Markdown: в обычной раскладке 'images/', в плоском
+    режиме '<имя>.images/'.
     """
     from openai import OpenAI
 
-    system_prompt = SYSTEM_PROMPTS[_prompt_language(output_language)]
+    system_prompt = SYSTEM_PROMPTS[_prompt_language(output_language)].format(
+        images_prefix=images_prefix)
 
     user_message = (
         "Транскрипт лекции:\n"
         f"{_render_transcript(transcript)}\n\n"
         "Ключевые кадры:\n"
-        f"{_render_keyframes(descriptions)}"
+        f"{_render_keyframes(descriptions, images_prefix)}"
     )
 
     api_key = api_key_from(provider)

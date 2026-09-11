@@ -41,14 +41,14 @@ class TestCache:
         monkeypatch.setattr("absorbent.transcribe._whisper_transcribe", _boom)
         monkeypatch.setattr("absorbent.transcribe._voxtral_transcribe", _boom)
         detected = run_stt(_whisper_spec(), Provider(name="x", base_url=""), tmp_path / "input.mp4",
-                           "auto", out)
+                           "auto", out, tmp_path)
         assert detected == "ru"
 
     def test_cached_without_language_returns_none(self, tmp_path: Path) -> None:
         out = tmp_path / "transcript.json"
         _write_cached(out)
         detected = run_stt(_whisper_spec(), Provider(name="x", base_url=""), tmp_path / "input.mp4",
-                           "auto", out)
+                           "auto", out, tmp_path)
         assert detected is None
 
     def test_force_reruns(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -62,7 +62,7 @@ class TestCache:
 
         monkeypatch.setattr("absorbent.transcribe._whisper_transcribe", _fake_whisper)
         run_stt(_whisper_spec(), Provider(name="x", base_url=""), tmp_path / "input.mp4", "auto", out,
-                force=True)
+                tmp_path, force=True)
         assert calls["n"] == 1
 
 
@@ -77,7 +77,7 @@ class TestWhisperBackend:
         input_path.write_bytes(b"media")
         out = tmp_path / "transcript.json"
 
-        detected = run_stt(_whisper_spec(), Provider(name="x", base_url=""), input_path, "auto", out)
+        detected = run_stt(_whisper_spec(), Provider(name="x", base_url=""), input_path, "auto", out, tmp_path)
         assert detected == "ru"
         data = json.loads(out.read_text(encoding="utf-8"))
         assert data == [
@@ -96,13 +96,13 @@ class TestWhisperBackend:
         fake_whisper["cuda"] = False
         fake_whisper["language"] = None
         run_stt(_whisper_spec(), Provider(name="x", base_url=""), tmp_path / "in.mp4", "ru",
-                tmp_path / "t.json")
+                tmp_path / "t.json", tmp_path)
         assert fake_whisper["load_calls"][0][1] == "cpu"
 
     def test_explicit_language_passed(self, tmp_path: Path, fake_whisper: dict) -> None:
         fake_whisper["language"] = "ru"
         run_stt(_whisper_spec(), Provider(name="x", base_url=""), tmp_path / "in.mp4", "en",
-                tmp_path / "t.json")
+                tmp_path / "t.json", tmp_path)
         assert fake_whisper["transcribe_calls"][0]["language"] == "en"
 
     def test_empty_segments_warns_and_writes_empty(self, tmp_path: Path, fake_whisper: dict,
@@ -111,7 +111,7 @@ class TestWhisperBackend:
         fake_whisper["language"] = None
         out = tmp_path / "transcript.json"
         detected = run_stt(_whisper_spec(), Provider(name="x", base_url=""), tmp_path / "in.mp4",
-                           "auto", out)
+                           "auto", out, tmp_path)
         assert detected is None
         assert json.loads(out.read_text(encoding="utf-8")) == []
         assert "пустой транскрипт" in capsys.readouterr().out
@@ -121,7 +121,7 @@ class TestWhisperBackend:
         _write_cached(out, language="ru")
         fake_whisper["language"] = None
         run_stt(_whisper_spec(), Provider(name="x", base_url=""), tmp_path / "in.mp4", "auto", out,
-                force=True)
+                tmp_path, force=True)
         assert not out.with_name("language.txt").exists()
 
 
@@ -153,7 +153,7 @@ class TestVoxtralBackend:
             "usage": {},
         }
         out, provider = self._prepare(tmp_path, fake_openai, monkeypatch, payload)
-        detected = run_stt(_voxtral_spec(), provider, tmp_path / "input.mp4", "auto", out)
+        detected = run_stt(_voxtral_spec(), provider, tmp_path / "input.mp4", "auto", out, tmp_path)
         assert detected == "ru"
         data = json.loads(out.read_text(encoding="utf-8"))
         assert data == [
@@ -175,7 +175,7 @@ class TestVoxtralBackend:
         monkeypatch.setenv("MISTRAL_API_KEY", "key123")
         payload = {"text": "t", "language": "en", "segments": [], "usage": {}}
         out, provider = self._prepare(tmp_path, fake_openai, monkeypatch, payload)
-        run_stt(_voxtral_spec(), provider, tmp_path / "input.mp4", "ru", out)
+        run_stt(_voxtral_spec(), provider, tmp_path / "input.mp4", "ru", out, tmp_path)
         assert fake_openai.audio.transcriptions.calls[0]["extra_body"]["language"] == "ru"
 
     def test_voxtral_fallback_single_segment(self, tmp_path: Path, fake_openai,
@@ -186,7 +186,7 @@ class TestVoxtralBackend:
         payload = {"text": "только текст без сегментов", "language": None, "segments": [], "usage": {}}
         monkeypatch.setattr(transcribe_module, "_audio_duration_seconds", lambda path: 42.5)
         out, provider = self._prepare(tmp_path, fake_openai, monkeypatch, payload)
-        detected = run_stt(_voxtral_spec(), provider, tmp_path / "input.mp4", "auto", out)
+        detected = run_stt(_voxtral_spec(), provider, tmp_path / "input.mp4", "auto", out, tmp_path)
         assert detected is None
         data = json.loads(out.read_text(encoding="utf-8"))
         assert data == [{"start": 0.0, "end": 42.5, "text": "только текст без сегментов",
@@ -198,7 +198,7 @@ class TestVoxtralBackend:
         out, provider = self._prepare(tmp_path, fake_openai, monkeypatch,
                                       {"text": "", "language": None, "segments": []})
         with pytest.raises(ConfigError, match="MISTRAL_API_KEY"):
-            run_stt(_voxtral_spec(), provider, tmp_path / "input.mp4", "auto", out)
+            run_stt(_voxtral_spec(), provider, tmp_path / "input.mp4", "auto", out, tmp_path)
 
     def test_unknown_backend(self, tmp_path: Path) -> None:
         class Bogus:
@@ -208,7 +208,7 @@ class TestVoxtralBackend:
 
         with pytest.raises(STTError, match="bogus"):
             run_stt(Bogus(), Provider(name="x", base_url=""), tmp_path / "in.mp4", "auto",
-                    tmp_path / "t.json")
+                    tmp_path / "t.json", tmp_path)
 
 
 class TestAudioHelpers:

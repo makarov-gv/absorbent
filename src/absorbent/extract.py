@@ -29,3 +29,22 @@ def extract_frames(input_path: Path, frames_dir: Path, fps: float, force: bool =
     if proc.returncode != 0:
         raise ExtractionError(f"ffmpeg завершился с кодом {proc.returncode}: {proc.stderr.strip()}")
     return sorted(frames_dir.glob("frame_*.jpg"))
+
+
+def has_video_stream(input_path: Path) -> bool:
+    """Есть ли во входном файле видеопоток (ffprobe -select_streams v).
+
+    Аудиовходы (mp3, m4a) видеопотока не содержат, и попытка извлечь из них
+    кадры заканчивается для ffmpeg кодом 234 «Output file does not contain
+    any stream». Ненулевой код ffprobe (битый файл, отсутствие ffprobe)
+    тоже даёт False: конвейер продолжит работу по одной аудиодорожке.
+    """
+    proc = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v", "-show_entries", "stream=index",
+         "-of", "csv=p=0", str(input_path)],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return False
+    return bool(proc.stdout.strip())

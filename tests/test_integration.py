@@ -72,14 +72,16 @@ def offline_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args_names
     video = _build_video(tmp_path)
     out_dir = tmp_path / "out"
 
-    def _fake_stt(spec, provider, input_path, language, out_json, force=False):
+    def _fake_stt(spec, provider, input_path, language, out_json, work_dir, force=False):
         segments = [
             {"start": 0.0, "end": 2.0, "text": "Введение в тему", "speaker": None},
             {"start": 5.5, "end": 7.0, "text": "Теперь формулы", "speaker": None},
             {"start": 10.5, "end": 12.0, "text": "Подводим итоги", "speaker": None},
         ]
+        out_json.parent.mkdir(parents=True, exist_ok=True)
         out_json.write_text(json.dumps(segments, ensure_ascii=False), encoding="utf-8")
-        out_json.with_name("language.txt").write_text("ru", encoding="utf-8")
+        work_dir.mkdir(parents=True, exist_ok=True)
+        (work_dir / "language.txt").write_text("ru", encoding="utf-8")
         return "ru"
 
     def _fake_describe(vision_spec, provider, keyframes, transcript, images_dir, output_language,
@@ -91,12 +93,13 @@ def offline_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args_names
         out_json.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         return data
 
-    def _fake_synthesize(llm_spec, provider, transcript, descriptions, output_language, out_md):
+    def _fake_synthesize(llm_spec, provider, transcript, descriptions, output_language, out_md,
+                         images_prefix="images/"):
         # Реалистичный Markdown: подпись + ссылка на каждый кадр (по контракту
         # имена берутся только из списка описаний).
         parts = ["# Конспект интеграционного теста\n"]
         for name in sorted(descriptions):
-            parts.append(f"![Кадр {descriptions[name]['timestamp']}](images/{name})\n")
+            parts.append(f"![Кадр {descriptions[name]['timestamp']}]({images_prefix}{name})\n")
         out_md.parent.mkdir(parents=True, exist_ok=True)
         out_md.write_text("\n".join(parts), encoding="utf-8")
         return out_md
@@ -104,7 +107,10 @@ def offline_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args_names
     monkeypatch.setattr(pipeline_module, "run_stt", _fake_stt)
     monkeypatch.setattr(pipeline_module, "describe_keyframes", _fake_describe)
     monkeypatch.setattr(pipeline_module, "run_synthesize", _fake_synthesize)
-    monkeypatch.setattr(pipeline_module, "render_all", lambda notes_md: None)
+    def _skip_render(notes_md, out_html=None, out_pdf=None):
+        return notes_md.with_name("notes.html"), notes_md.with_name("notes.pdf")
+
+    monkeypatch.setattr(pipeline_module, "render_all", _skip_render)
     cfg = load_config(str(REPO_CONFIG))
     return video, out_dir, cfg, args_namespace
 
@@ -150,3 +156,33 @@ class TestEndToEnd:
         # Порог 0 всё равно оставляет три разных паттерна (расстояния > 0).
         second = sorted(p.name for p in (out_dir / "images").glob("frame_*.jpg"))
         assert second == first
+
+
+class TestAudioFlatMode:
+    """Аудиовход в плоском режиме: настоящие ffmpeg/ffprobe, сетевые этапы подменены."""
+
+    def test_audio_input_flat_layout(self, offline_pipeline, tmp_path: Path) -> None:
+        _, _, cfg, args = offline_pipeline
+        audio = tmp_path / "lecture.wav"
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+             "-i", "sine=frequency=440:duration=3", "-ac", "1", "-ar", "16000", str(audio)],
+            check=True,
+            capture_output=True,
+        )
+        args.flat = True
+        notes = process_file(audio, cfg, args)
+
+        # Результат и сырой транскрипт — рядом с медиафайлом.
+        assert notes == tmp_path / "lecture.md"
+        transcript = json.loads((tmp_path / "lecture.json").read_text(encoding="utf-8"))
+        assert [seg["text"] for seg in transcript] == ["Введение в тему", "Теперь формулы",
+                                                       "Подводим итоги"]
+        # Кадров нет: у wav нет видеопотока, каталог изображений пуст.
+        assert not list((tmp_path / "lecture.images").glob("frame_*.jpg"))
+        assert "lecture.images/" not in notes.read_text(encoding="utf-8")
+        # Кэш — в <каталог>/.absorbent/<имя>/, каталога <имя>/ нет.
+        cache = tmp_path / ".absorbent" / "lecture"
+        assert (cache / "language.txt").read_text(encoding="utf-8") == "ru"
+        assert not (cache / "transcript.json").exists()
+        assert not (tmp_path / "lecture").exists()

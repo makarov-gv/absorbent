@@ -127,14 +127,19 @@ def _voxtral_transcribe(spec: ModelSpec, provider: Provider, input_path: Path, l
 
 
 def run_stt(spec: ModelSpec, provider: Provider, input_path: Path, language: str, out_json: Path,
-            force: bool = False) -> str | None:
+            work_dir: Path, force: bool = False) -> str | None:
     """Запустить распознавание речи; вернуть обнаруженный язык ("ru"/"en"/None).
 
-    Пишет transcript.json в out_json. При наличии кэша и без force возвращает
-    язык из кэша (файл language.txt рядом с transcript.json), не транскрибируя.
-    Пустой результат (нет аудиодорожки) пишется как [] с предупреждением.
+    Пишет transcript.json в out_json, а служебные файлы этапа — в work_dir
+    (каталог кэша): language.txt и извлечённое для облачного Voxtral аудио
+    audio.wav. В плоском режиме результат (transcript.json) лежит рядом с
+    медиафайлом, а кэш — в <каталог>/.absorbent/<имя>/, поэтому пути
+    результата и кэша разведены. При наличии кэша и без force возвращает
+    язык из кэша, не транскрибируя. Пустой результат (нет аудиодорожки)
+    пишется как [] с предупреждением.
     """
-    lang_file = out_json.with_name("language.txt")
+    work_dir.mkdir(parents=True, exist_ok=True)
+    lang_file = work_dir / "language.txt"
     if out_json.exists() and not force:
         if lang_file.exists():
             return lang_file.read_text(encoding="utf-8").strip() or None
@@ -143,7 +148,7 @@ def run_stt(spec: ModelSpec, provider: Provider, input_path: Path, language: str
     if spec.backend == "whisper":
         segments, detected = _whisper_transcribe(spec, input_path, language)
     elif spec.backend == "voxtral":
-        audio_path = out_json.with_name("audio.wav")
+        audio_path = work_dir / "audio.wav"
         segments, detected = _voxtral_transcribe(spec, provider, input_path, language, audio_path)
     else:
         raise STTError(f"неизвестный backend распознавания: '{spec.backend}'")

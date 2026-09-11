@@ -191,3 +191,24 @@ class TestRenderAll:
         notes = _notes(tmp_path)
         with pytest.raises(FileNotFoundError):
             render_all(notes)
+
+    def test_explicit_output_paths(self, tmp_path: Path,
+                                   monkeypatch: pytest.MonkeyPatch) -> None:
+        """Плоский режим: HTML и PDF называются по имени медиафайла."""
+        monkeypatch.setattr(shutil, "which", _fake_which)
+        notes = tmp_path / "lecture.md"
+        notes.write_text("# Лекция\n\n![кадр](lecture.images/frame_00_00_00.jpg)\n",
+                         encoding="utf-8")
+        order: list[str] = []
+
+        def _fake_run(cmd, **kwargs):
+            order.append(cmd[0].rsplit("/", 1)[-1])
+            if "-o" in cmd:
+                Path(cmd[cmd.index("-o") + 1]).write_bytes(b"out")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+        html, pdf = render_all(notes, tmp_path / "lecture.html", tmp_path / "lecture.pdf")
+        assert (html, pdf) == (tmp_path / "lecture.html", tmp_path / "lecture.pdf")
+        assert html.exists() and pdf.exists()
+        assert order == ["fmt-md-tables", "pandoc", "pandoc"]

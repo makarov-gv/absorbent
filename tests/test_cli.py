@@ -56,6 +56,7 @@ class TestParser:
         assert args.skip_render is False
         assert args.stt is None and args.vision_model is None and args.llm_model is None
         assert args.config is None
+        assert args.flat is False
 
     def test_explicit_values(self) -> None:
         parser = build_parser()
@@ -64,13 +65,14 @@ class TestParser:
             "--llm-model", "l", "--language", "ru", "--output-language", "en",
             "--fps", "2", "--hash-threshold", "5",
             "--output-dir", "out", "--force", "--skip-stt", "--skip-frames",
-            "--skip-describe", "--skip-synthesize", "--skip-render",
+            "--skip-describe", "--skip-synthesize", "--skip-render", "--flat",
         ])
         assert args.language == "ru" and args.output_language == "en"
         assert args.fps == 2.0 and args.hash_threshold == 5
         assert args.skip_render is True
         assert args.stt == "x" and args.output_dir == "out" and args.force is True
         assert args.skip_describe is True and args.skip_synthesize is True
+        assert args.flat is True
 
     def test_bad_language_rejected(self) -> None:
         with pytest.raises(SystemExit):
@@ -108,6 +110,29 @@ class TestMain:
         code = main([str(video), "--config", str(config)])
         assert code == 0
         assert processed == [video]
+
+    def test_flat_flag_reaches_process_file(self, tmp_path: Path,
+                                            monkeypatch: pytest.MonkeyPatch) -> None:
+        """--flat доезжает до process_file в аргументах."""
+        video = tmp_path / "lec.mp4"
+        video.write_bytes(b"x")
+        config = tmp_path / "config.yaml"
+        config.write_text(
+            "providers:\n  p: {base_url: u, api_key_env: ''}\n"
+            "stt:\n  s: {backend: whisper, whisper_model: tiny, default: true}\n"
+            "vision:\n  v: {provider: p, default: true}\n"
+            "llm:\n  l: {provider: p, default: true}\n",
+            encoding="utf-8",
+        )
+        seen: dict = {}
+
+        def _fake_process(input_path, cfg, args):
+            seen["flat"] = args.flat
+            return input_path.with_name("lec.md")
+
+        monkeypatch.setattr("absorbent.pipeline.process_file", _fake_process)
+        assert main([str(video), "--config", str(config), "--flat"]) == 0
+        assert seen["flat"] is True
 
     def test_processes_directory(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         (tmp_path / "a.mp4").write_bytes(b"x")

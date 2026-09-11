@@ -52,6 +52,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="каталог результата (по умолчанию: <имя_файла>/ рядом с входным файлом)",
     )
     parser.add_argument(
+        "--flat",
+        action="store_true",
+        help="результат и сырой транскрипт рядом с входным файлом "
+             "(<имя>.md, <имя>.json), кэш — в <каталог>/.absorbent/<имя>/",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="игнорировать кэш промежуточных результатов и перезапустить все этапы",

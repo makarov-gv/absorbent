@@ -45,9 +45,15 @@ class TestRenderKeyframes:
             "frame_00_00_05.jpg": {"timestamp": "00:00:05", "description": "пять"},
             "frame_00_00_00.jpg": {"timestamp": "00:00:00", "description": "ноль"},
         }
-        rendered = _render_keyframes(descriptions)
+        rendered = _render_keyframes(descriptions, "images/")
         assert rendered.splitlines()[0].startswith("- images/frame_00_00_00.jpg [00:00:00]: ноль")
         assert rendered.splitlines()[1].startswith("- images/frame_00_00_05.jpg [00:00:05]: пять")
+
+    def test_custom_prefix(self) -> None:
+        """Плоский режим: кадры лежат в <имя>.images/, и модель видит этот путь."""
+        descriptions = {"frame_00_00_00.jpg": {"timestamp": "00:00:00", "description": "ноль"}}
+        rendered = _render_keyframes(descriptions, "lecture.images/")
+        assert rendered == "- lecture.images/frame_00_00_00.jpg [00:00:00]: ноль"
 
 
 class TestRunSynthesize:
@@ -97,6 +103,19 @@ class TestRunSynthesize:
         system = fake_openai.chat.completions.calls[0]["messages"][0]["content"]
         assert "Пиши весь конспект на русском языке" in system
         assert "сохраняй как есть" in system
+
+    def test_custom_images_prefix_reaches_prompt_and_frames(self, tmp_path: Path, fake_openai,
+                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+        """Плоский режим: префикс картинок уходит и в системный промпт, и в список кадров."""
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        fake_openai.set_replies(["ок"])
+        descriptions = {"frame_00_00_00.jpg": {"timestamp": "00:00:00", "description": "слайд"}}
+        run_synthesize(LLM_SPEC, _provider(), [], descriptions, "ru", tmp_path / "lecture.md",
+                       images_prefix="lecture.images/")
+        call = fake_openai.chat.completions.calls[0]
+        assert "![подпись](lecture.images/<имя_файла>)" in call["messages"][0]["content"]
+        assert "images/" not in call["messages"][0]["content"].replace("lecture.images/", "")
+        assert "- lecture.images/frame_00_00_00.jpg [00:00:00]: слайд" in call["messages"][1]["content"]
 
     def test_unavailable_transcript_passed(self, tmp_path: Path, fake_openai,
                                            monkeypatch: pytest.MonkeyPatch) -> None:

@@ -138,16 +138,20 @@ def render_pdf(notes_md: Path, out_pdf: Path) -> None:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
 
 
-def render_all(notes_md: Path) -> tuple[Path, Path]:
-    """Постпроцессинг: выровнять таблицы, собрать notes.html и notes.pdf.
+def render_all(notes_md: Path, out_html: Path | None = None,
+               out_pdf: Path | None = None) -> tuple[Path, Path]:
+    """Постпроцессинг: выровнять таблицы, собрать HTML и PDF.
 
     Таблицы notes.md выравниваются in-place скриптом fmt-md-tables.
-    Возвращает пути (html, pdf) рядом с notes.md.
+    Пути HTML и PDF по умолчанию — notes.html и notes.pdf рядом с notes.md,
+    как в раскладке <имя>/. Плоский режим передаёт <имя>.html и <имя>.pdf:
+    относительные ссылки на картинки разрешает --resource-path по каталогу
+    notes.md, поэтому имена файлов результата произвольны.
     """
     notes_md = Path(notes_md)
     fmt_tables(notes_md)
-    out_html = notes_md.with_name("notes.html")
-    out_pdf = notes_md.with_name("notes.pdf")
+    out_html = Path(out_html) if out_html is not None else notes_md.with_name("notes.html")
+    out_pdf = Path(out_pdf) if out_pdf is not None else notes_md.with_name("notes.pdf")
     render_html(notes_md, out_html)
     render_pdf(notes_md, out_pdf)
     return out_html, out_pdf

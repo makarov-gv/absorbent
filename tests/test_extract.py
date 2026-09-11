@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from absorbent.extract import ExtractionError, extract_frames
+from absorbent.extract import ExtractionError, extract_frames, has_video_stream
 
 
 class TestExtractFrames:
@@ -91,3 +91,32 @@ class TestExtractFrames:
         frames = extract_frames(video, tmp_path / "frames", 1.0)
         assert len(frames) == 1
         assert frames[0].name == "frame_000001.jpg"
+
+
+class TestHasVideoStream:
+    def _probe(self, monkeypatch: pytest.MonkeyPatch, returncode: int, stdout: str
+               ) -> list[list[str]]:
+        calls: list[list[str]] = []
+
+        def _fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, returncode, stdout=stdout, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+        return calls
+
+    def test_video_stream_found(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = self._probe(monkeypatch, 0, "0\n")
+        assert has_video_stream(tmp_path / "lecture.mkv") is True
+        # Запрос именно видеопотоков, поток вывода — csv без обёртки.
+        assert calls[0][:6] == ["ffprobe", "-v", "error", "-select_streams", "v",
+                                "-show_entries"]
+        assert calls[0][-1] == str(tmp_path / "lecture.mkv")
+
+    def test_no_video_stream(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._probe(monkeypatch, 0, "")
+        assert has_video_stream(tmp_path / "audio.mp3") is False
+
+    def test_ffprobe_error_is_false(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._probe(monkeypatch, 1, "")
+        assert has_video_stream(tmp_path / "broken.mp4") is False
