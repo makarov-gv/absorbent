@@ -60,9 +60,10 @@ def fake_stages(monkeypatch: pytest.MonkeyPatch) -> dict:
         out_md.write_text("# Конспект\n", encoding="utf-8")
         return out_md
 
-    def _render(notes_md, out_html=None, out_pdf=None):
+    def _render(notes_md, out_html=None, out_pdf=None, lang=None):
         state["calls"].append("render")
         state["render_paths"] = (out_html, out_pdf)
+        state["render_lang"] = lang
         return notes_md.with_name("notes.html"), notes_md.with_name("notes.pdf")
 
     def _has_video(input_path):
@@ -116,6 +117,8 @@ class TestProcessFile:
         assert "stt:en" in fake_stages["calls"]
         assert "describe:en:1" in fake_stages["calls"]
         assert "synthesize:en:1" in fake_stages["calls"]
+        # Язык вёрстки конспекта следует за языком результата, а не за подсказкой whisper.
+        assert fake_stages["render_lang"] == "en"
         assert (tmp_path / "custom" / ".absorbent" / "language.txt").read_text(encoding="utf-8") == "ru"
 
     def test_second_run_reuses_cache(self, tmp_path: Path, cfg, fake_stages: dict,

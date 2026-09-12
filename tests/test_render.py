@@ -13,7 +13,11 @@ from pathlib import Path
 import pytest
 
 from absorbent.render import (
+    GITHUB_CSS,
+    HTML_COLUMN_PX,
+    _bg_default,
     _extract_title,
+    _page_css,
     _tool,
     fmt_tables,
     render_all,
@@ -35,6 +39,19 @@ def _notes(tmp_path: Path, with_title: bool = True) -> Path:
     path = tmp_path / "notes.md"
     path.write_text(body, encoding="utf-8")
     return path
+
+
+def _capture(cmd: list[str]) -> dict:
+    """Снимок временных файлов, которые pandoc получает в момент вызова.
+
+    Каталог с ними живёт только внутри render_html/render_pdf, поэтому
+    читать их нужно из подменённого subprocess.run, а не после возврата.
+    """
+    return {
+        "body": Path(cmd[1]).read_text(encoding="utf-8"),
+        "parts": {flag: Path(cmd[cmd.index(flag) + 1]).read_text(encoding="utf-8")
+                  for flag in ("-H", "-B", "-A") if flag in cmd},
+    }
 
 
 class TestExtractTitle:
@@ -63,6 +80,35 @@ class TestTool:
         monkeypatch.setattr(shutil, "which", lambda name: None)
         with pytest.raises(FileNotFoundError, match="skip-render"):
             _tool("pandoc")
+
+
+class TestPageCss:
+    """Фон страницы и ширина полосы: штатные стили pandoc их не задают верно."""
+
+    def test_takes_theme_colors_from_stylesheet(self) -> None:
+        css = _page_css(GITHUB_CSS.read_text(encoding="utf-8"))
+        assert "background-color: #ffffff" in css
+        assert "@media (prefers-color-scheme: dark)" in css
+        assert "#0d1117" in css
+
+    def test_color_lookup_uses_fallback_when_query_absent(self) -> None:
+        assert _bg_default(".markdown-body { color: red; }",
+                           "@media (prefers-color-scheme: dark)", "#000") == "#000"
+
+    def test_color_lookup_uses_fallback_when_value_absent(self) -> None:
+        css = "@media (prefers-color-scheme: dark) { .markdown-body { color: red; } }"
+        assert _bg_default(css, "@media (prefers-color-scheme: dark)", "#000") == "#000"
+
+    def test_color_lookup_takes_first_value_after_query(self) -> None:
+        css = ("@media (prefers-color-scheme: light) { .x { --bgColor-default: #fff; } }\n"
+               "@media (prefers-color-scheme: dark) { .x { --bgColor-default: #111; } }")
+        assert _bg_default(css, "@media (prefers-color-scheme: light)", "#000") == "#fff"
+        assert _bg_default(css, "@media (prefers-color-scheme: dark)", "#000") == "#111"
+
+    def test_resets_pandoc_body_column(self) -> None:
+        css = _page_css("")
+        assert "max-width: none" in css
+        assert f"max-width: {HTML_COLUMN_PX}px" in css
 
 
 class TestFmtTables:
@@ -94,6 +140,7 @@ class TestRenderHtml:
         def _fake_run(cmd, **kwargs):
             seen["cmd"] = cmd
             seen["check"] = kwargs.get("check")
+            seen.update(_capture(cmd))
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text("<html>ok</html>", encoding="utf-8")
 
@@ -103,17 +150,17 @@ class TestRenderHtml:
         assert "--standalone" in cmd and "--embed-resources" in cmd
         assert "--mathml" in cmd
         assert seen["check"] is True
+        assert cmd[cmd.index("-V") + 1] == "lang=ru"
         # title уходит в метаданные pandoc.
         assert any(c.startswith("pagetitle=Конспект лекции") for c in cmd)
-        # Обёртка .markdown-body и CSS задаются временными файлами (-H/-B/-A).
-        assert "-H" in cmd and "-B" in cmd and "-A" in cmd
-        header = Path(cmd[cmd.index("-H") + 1])
-        header_text = header.read_text(encoding="utf-8")
-        assert "<style>" in header_text and "markdown-body" in header_text
-        before = Path(cmd[cmd.index("-B") + 1])
-        assert before.read_text(encoding="utf-8").strip() == '<article class="markdown-body">'
-        after = Path(cmd[cmd.index("-A") + 1])
-        assert after.read_text(encoding="utf-8").strip() == "</article>"
+        # Заголовок остаётся и в теле: у HTML-версии должен быть видимый h1.
+        assert seen["body"].startswith("# Конспект лекции")
+        # CSS и обёртка задаются временными файлами (-H/-B/-A).
+        assert "<style>" in seen["parts"]["-H"]
+        assert "markdown-body.page" in seen["parts"]["-H"]
+        assert 'class="markdown-body page"' in seen["parts"]["-B"]
+        assert 'class="page-inner"' in seen["parts"]["-B"]
+        assert seen["parts"]["-A"].strip() == "</div>\n</div>"
 
     def test_html_without_title_omits_metadata(self, tmp_path: Path,
                                                monkeypatch: pytest.MonkeyPatch) -> None:
@@ -129,6 +176,20 @@ class TestRenderHtml:
         render_html(notes, tmp_path / "notes.html")
         assert not any(c.startswith("pagetitle=") for c in seen["cmd"])
 
+    def test_language_reaches_pandoc(self, tmp_path: Path,
+                                     monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(shutil, "which", _fake_which)
+        notes = _notes(tmp_path)
+        seen: dict = {}
+
+        def _fake_run(cmd, **kwargs):
+            seen["cmd"] = cmd
+            (tmp_path / "notes.html").write_text("x", encoding="utf-8")
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+        render_html(notes, tmp_path / "notes.html", lang="en")
+        assert seen["cmd"][seen["cmd"].index("-V") + 1] == "lang=en"
+
 
 class TestRenderPdf:
     def test_lualatex_with_fonts(self, tmp_path: Path,
@@ -140,6 +201,7 @@ class TestRenderPdf:
 
         def _fake_run(cmd, **kwargs):
             seen["cmd"] = cmd
+            seen.update(_capture(cmd))
             out.write_bytes(b"%PDF")
 
         monkeypatch.setattr(subprocess, "run", _fake_run)
@@ -147,8 +209,14 @@ class TestRenderPdf:
         cmd = seen["cmd"]
         assert "--pdf-engine=lualatex" in cmd
         assert any(c == "mainfont=DejaVu Serif" for c in cmd)
-        assert any(c == "geometry:margin=2cm" for c in cmd)
+        assert any(c == "geometry:a4paper,margin=1.8cm" for c in cmd)
+        assert any(c == "lang=ru" for c in cmd)
         assert any(c.startswith("title=Конспект лекции") for c in cmd)
+        # Заголовок вынесен из тела в метаданные title.
+        assert not seen["body"].startswith("# ")
+        # Преамбула делает рисунки неразрывными с текстом и разрешает переносы.
+        assert "\\renewenvironment{figure}" in seen["parts"]["-H"]
+        assert "\\emergencystretch" in seen["parts"]["-H"]
 
     def test_pdf_without_title_omits_metadata(self, tmp_path: Path,
                                               monkeypatch: pytest.MonkeyPatch) -> None:

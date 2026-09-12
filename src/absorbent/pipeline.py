@@ -119,9 +119,10 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
     if not getattr(args, "skip_render", False) and notes_path.exists():
         print(f"[{stem}] постпроцессинг: таблицы, HTML, PDF...")
         if flat:
-            render_all(notes_path, output_dir / f"{stem}.html", output_dir / f"{stem}.pdf")
+            render_all(notes_path, output_dir / f"{stem}.html", output_dir / f"{stem}.pdf",
+                       lang=output_language)
             print(f"[{stem}] готово: {notes_path}")
         else:
-            render_all(notes_path)
+            render_all(notes_path, lang=output_language)
             print(f"[{stem}] готово: {notes_path} (+ notes.html, notes.pdf)")
     return notes_path

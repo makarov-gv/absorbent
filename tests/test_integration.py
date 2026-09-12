@@ -107,7 +107,7 @@ def offline_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args_names
     monkeypatch.setattr(pipeline_module, "run_stt", _fake_stt)
     monkeypatch.setattr(pipeline_module, "describe_keyframes", _fake_describe)
     monkeypatch.setattr(pipeline_module, "run_synthesize", _fake_synthesize)
-    def _skip_render(notes_md, out_html=None, out_pdf=None):
+    def _skip_render(notes_md, out_html=None, out_pdf=None, lang=None):
         return notes_md.with_name("notes.html"), notes_md.with_name("notes.pdf")
 
     monkeypatch.setattr(pipeline_module, "render_all", _skip_render)
