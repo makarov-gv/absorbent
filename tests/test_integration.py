@@ -1,8 +1,8 @@
 """Интеграционный тест: реальные ffmpeg/ffprobe/pHash, сетевые вызовы подменены.
 
 Проверяет весь конвейер process_file end-to-end на синтетическом видео с
-тремя разными статичными слайдами: реальные извлечение кадров и
-дедупликация должны дать три ключевых кадра (0/5/10 с), а подменённые
+тремя разными статичными слайдами: реальные извлечение и отбор
+ключевых кадров должны дать три кадра (0/5/10 с), а подменённые
 STT/vision/LLM — собрать notes.md, где имена изображений ровно совпадают с
 файлами на диске (контракт шага синтеза).
 """
@@ -66,7 +66,7 @@ def _build_video(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def offline_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args_namespace):
-    """process_file с реальными extract/dedup и подменёнными сетевыми этапами."""
+    """process_file с реальными extract/select и подменёнными сетевыми этапами."""
     import absorbent.pipeline as pipeline_module
 
     video = _build_video(tmp_path)
@@ -142,8 +142,8 @@ class TestEndToEnd:
         process_file(video, cfg, args)
         assert notes_path.exists()
 
-    def test_reproducible_dedup_on_rerun(self, offline_pipeline) -> None:
-        """Повторная дедупликация из кэша кадров даёт те же ключевые кадры."""
+    def test_reproducible_selection_on_rerun(self, offline_pipeline) -> None:
+        """Повторный отбор из кэша кадров даёт те же ключевые кадры."""
         video, out_dir, cfg, args = offline_pipeline
         args.output_dir = str(out_dir)
         process_file(video, cfg, args)

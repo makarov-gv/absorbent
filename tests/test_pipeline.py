@@ -30,8 +30,8 @@ def fake_stages(monkeypatch: pytest.MonkeyPatch) -> dict:
             (frames_dir / f"frame_{i+1:06d}.jpg").write_bytes(b"jpeg")
         return sorted(frames_dir.glob("frame_*.jpg"))
 
-    def _dedup(frames, images_dir, fps, threshold):
-        state["calls"].append(f"dedup:{threshold}")
+    def _select(frames, images_dir, fps, threshold, min_seconds):
+        state["calls"].append(f"select:{threshold}:{min_seconds}")
         images_dir.mkdir(parents=True, exist_ok=True)
         (images_dir / "frame_00_00_00.jpg").write_bytes(b"jpeg")
         return [{"image": "frame_00_00_00.jpg", "seconds": 0.0, "timestamp": "00:00:00"}]
@@ -73,7 +73,7 @@ def fake_stages(monkeypatch: pytest.MonkeyPatch) -> dict:
 
     monkeypatch.setattr(pipeline_module, "has_video_stream", _has_video)
     monkeypatch.setattr(pipeline_module, "extract_frames", _extract)
-    monkeypatch.setattr(pipeline_module, "dedup_frames", _dedup)
+    monkeypatch.setattr(pipeline_module, "select_keyframes", _select)
     monkeypatch.setattr(pipeline_module, "run_stt", _run_stt)
     monkeypatch.setattr(pipeline_module, "describe_keyframes", _describe)
     monkeypatch.setattr(pipeline_module, "run_synthesize", _synthesize)
@@ -103,7 +103,7 @@ class TestProcessFile:
             assert (out_dir / ".absorbent" / name).exists()
         # Порядок этапов: язык речи (auto) и язык результата (ru) независимы.
         assert fake_stages["calls"] == [
-            "extract", "dedup:10", "stt:auto", "describe:ru:1", "synthesize:ru:1", "render",
+            "extract", "select:10:5.0", "stt:auto", "describe:ru:1", "synthesize:ru:1", "render",
         ]
 
     def test_custom_output_dir_and_languages(self, tmp_path: Path, cfg, fake_stages: dict,
@@ -127,7 +127,7 @@ class TestProcessFile:
         process_file(input_path, cfg, args_namespace)
         fake_stages["calls"].clear()
         process_file(input_path, cfg, args_namespace)
-        # Без force дедупликация пропускается (есть keyframes.json), а
+        # Без force отбор ключевых кадров пропускается (есть keyframes.json), а
         # extract_frames/run_stt вызываются, но возвращают кэш внутри.
         assert fake_stages["calls"] == ["extract", "stt:auto", "describe:ru:1", "synthesize:ru:1",
                                         "render"]
@@ -136,7 +136,7 @@ class TestProcessFile:
         args_namespace.force = True
         input_path = _input(tmp_path)
         process_file(input_path, cfg, args_namespace)
-        assert fake_stages["calls"] == ["extract", "dedup:10", "stt:auto", "describe:ru:1",
+        assert fake_stages["calls"] == ["extract", "select:10:5.0", "stt:auto", "describe:ru:1",
                                         "synthesize:ru:1", "render"]
 
     def test_skip_all_flags(self, tmp_path: Path, cfg, fake_stages: dict, args_namespace) -> None:
@@ -180,10 +180,11 @@ class TestProcessFile:
     def test_hash_threshold_passed(self, tmp_path: Path, cfg, fake_stages: dict,
                                    args_namespace) -> None:
         args_namespace.hash_threshold = 20
+        args_namespace.min_scene_seconds = 2.0
         args_namespace.force = True
         input_path = _input(tmp_path)
         process_file(input_path, cfg, args_namespace)
-        assert "dedup:20" in fake_stages["calls"]
+        assert "select:20:2.0" in fake_stages["calls"]
 
     def test_skip_render_skips_postprocess(self, tmp_path: Path, cfg, fake_stages: dict,
                                            args_namespace) -> None:
@@ -335,7 +336,7 @@ class TestFlatMode:
         args_namespace.flat = True
         notes = process_file(_input(tmp_path, "lecture.mp3"), cfg, args_namespace)
         assert "extract" not in fake_stages["calls"]
-        assert not any(c.startswith("dedup") for c in fake_stages["calls"])
+        assert not any(c.startswith("select") for c in fake_stages["calls"])
         assert not any(c.startswith("describe") for c in fake_stages["calls"])
         assert fake_stages["calls"] == ["stt:auto", "synthesize:ru:0", "render"]
         assert "кадров нет (аудио без видеопотока)" in capsys.readouterr().out

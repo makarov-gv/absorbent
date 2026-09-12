@@ -50,6 +50,7 @@ class TestParser:
         assert args.output_language == "ru"
         assert args.fps == 1.0
         assert args.hash_threshold == 10
+        assert args.min_scene_seconds == 5.0
         assert args.output_dir is None
         assert args.force is False
         assert args.skip_stt is False and args.skip_synthesize is False
@@ -64,11 +65,13 @@ class TestParser:
             "in.mkv", "--config", "c.yaml", "--stt", "x", "--vision-model", "v",
             "--llm-model", "l", "--language", "ru", "--output-language", "en",
             "--fps", "2", "--hash-threshold", "5",
+            "--min-scene-seconds", "2",
             "--output-dir", "out", "--force", "--skip-stt", "--skip-frames",
             "--skip-describe", "--skip-synthesize", "--skip-render", "--flat",
         ])
         assert args.language == "ru" and args.output_language == "en"
         assert args.fps == 2.0 and args.hash_threshold == 5
+        assert args.min_scene_seconds == 2.0
         assert args.skip_render is True
         assert args.stt == "x" and args.output_dir == "out" and args.force is True
         assert args.skip_describe is True and args.skip_synthesize is True

@@ -44,7 +44,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=10,
         metavar="N",
-        help="порог pHash-расстояния для дедупликации кадров, 0-64 (по умолчанию 10)",
+        help="порог pHash-расстояния в битах: граница сцены и отсев похожих ядер, 0-64 (по умолчанию 10)",
+    )
+    parser.add_argument(
+        "--min-scene-seconds",
+        type=float,
+        default=5.0,
+        metavar="S",
+        help="минимальная длительность сцены в секундах: более короткие отрезки считаются "
+             "анимацией или промежуточным состоянием (по умолчанию 5)",
     )
     parser.add_argument(
         "--output-dir",
@@ -63,7 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="игнорировать кэш промежуточных результатов и перезапустить все этапы",
     )
     parser.add_argument("--skip-stt", action="store_true", help="пропустить распознавание речи")
-    parser.add_argument("--skip-frames", action="store_true", help="пропустить извлечение и дедупликацию кадров")
+    parser.add_argument("--skip-frames", action="store_true", help="пропустить извлечение и отбор ключевых кадров")
     parser.add_argument("--skip-describe", action="store_true", help="пропустить описание кадров")
     parser.add_argument("--skip-synthesize", action="store_true", help="пропустить синтез Markdown")
     parser.add_argument("--skip-render", action="store_true",

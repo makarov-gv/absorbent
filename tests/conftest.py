@@ -210,6 +210,7 @@ def args_namespace() -> object:
         flat=False,
         fps=1.0,
         hash_threshold=10,
+        min_scene_seconds=5.0,
         force=False,
         skip_stt=False,
         skip_frames=False,

@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 
 from absorbent.config import Config
-from absorbent.dedup import dedup_frames
+from absorbent.dedup import select_keyframes
 from absorbent.describe import describe_keyframes
 from absorbent.extract import extract_frames, has_video_stream
 from absorbent.render import render_all
@@ -34,12 +34,13 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
     <имя>.json и <имя>.images/ ложатся рядом с медиафайлом, а кэш — в
     <каталог входа>/.absorbent/<имя>/.
 
-    Порядок этапов: извлечение кадров -> дедупликация -> распознавание речи
-    -> описание кадров -> синтез Markdown -> постпроцессинг (таблицы,
-    HTML, PDF). Вход без видеопотока (аудиофайл) пропускает все этапы
-    кадров: остаётся транскрипт и конспект без иллюстраций. Каждый этап
-    уважает свой `--skip-*` флаг и кэш в `.absorbent/` (обход кэша —
-    `--force`); постпроцессинг отключается флагом `--skip-render`.
+    Порядок этапов: извлечение кадров -> отбор ключевых кадров ->
+    распознавание речи -> описание кадров -> синтез Markdown ->
+    постпроцессинг (таблицы, HTML, PDF). Вход без видеопотока (аудиофайл)
+    пропускает все этапы кадров: остаётся транскрипт и конспект без
+    иллюстраций. Каждый этап уважает свой `--skip-*` флаг и кэш в
+    `.absorbent/` (обход кэша — `--force`); постпроцессинг отключается
+    флагом `--skip-render`.
 
     Язык распознавания речи (`--language`) и язык результата
     (`--output-language`) — независимые оси: первый лишь подсказывает whisper
@@ -73,13 +74,15 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
         directory.mkdir(parents=True, exist_ok=True)
 
     output_language = getattr(args, "output_language", "ru")
+    min_scene_seconds = getattr(args, "min_scene_seconds", 5.0)
 
     print(f"[{stem}] извлечение кадров...")
     keyframes: list[dict] = []
     if not args.skip_frames and has_video_stream(input_path):
         frames = extract_frames(input_path, frames_dir, args.fps, force=args.force)
         if args.force or not keyframes_path.exists():
-            keyframes = dedup_frames(frames, images_dir, args.fps, args.hash_threshold)
+            keyframes = select_keyframes(frames, images_dir, args.fps, args.hash_threshold,
+                                         min_scene_seconds)
             keyframes_path.write_text(json.dumps(keyframes, ensure_ascii=False, indent=2),
                                       encoding="utf-8")
         else:
