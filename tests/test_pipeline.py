@@ -193,6 +193,20 @@ class TestProcessFile:
         # Синтез отработал, но постпроцессинг не вызван.
         assert "render" not in fake_stages["calls"]
 
+    def test_synthesis_error_skips_render(self, tmp_path: Path, cfg, fake_stages: dict,
+                                          args_namespace, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Пустой ответ LLM: синтез падает, HTML и PDF не собираются."""
+        import absorbent.pipeline as pipeline_module
+        from absorbent.synthesize import SynthesisError
+
+        def _fail(*args, **kwargs):
+            raise SynthesisError("модель не вернула текст конспекта")
+
+        monkeypatch.setattr(pipeline_module, "run_synthesize", _fail)
+        with pytest.raises(SynthesisError):
+            process_file(_input(tmp_path), cfg, args_namespace)
+        assert "render" not in fake_stages["calls"]
+
 
 class TestHelpers:
     def test_load_json_missing_returns_empty_list(self, tmp_path: Path) -> None:

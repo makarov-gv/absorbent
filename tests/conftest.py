@@ -48,17 +48,29 @@ llm:
 
 
 class FakeChatCompletions:
-    """Подделка chat.completions: возвращает заданные тексты ответов."""
+    """Подделка chat.completions: возвращает заданные тексты ответов.
+
+    finish_reason, usage и reasoning соответствуют реальному ответу: их
+    читает диагностика пустого ответа в synthesize._empty_answer_details().
+    """
 
     def __init__(self, replies: list[str]) -> None:
         self.replies = list(replies)
         self.calls: list[dict] = []
+        self.finish_reason = "stop"
+        self.reasoning: str | None = None
 
     def create(self, **kwargs) -> object:
         self.calls.append(kwargs)
         content = self.replies.pop(0) if self.replies else "ответ модели"
-        choice = type("Choice", (), {"message": type("Msg", (), {"content": content})()})()
-        return type("Resp", (), {"choices": [choice]})()
+        message = type("Msg", (), {"content": content,
+                                   "model_extra": {"reasoning_content": self.reasoning}})()
+        choice = type("Choice", (), {"message": message, "finish_reason": self.finish_reason})()
+        usage = type("Usage", (), {
+            "completion_tokens": 123,
+            "completion_tokens_details": type("Details", (), {"reasoning_tokens": 99})(),
+        })()
+        return type("Resp", (), {"choices": [choice], "usage": usage})()
 
 
 class FakeAudioTranscriptions:

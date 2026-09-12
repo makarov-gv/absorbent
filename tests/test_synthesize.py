@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 
 from absorbent.config import ModelSpec, Provider
-from absorbent.synthesize import _prompt_language, _render_keyframes, _render_transcript, run_synthesize
+from absorbent.synthesize import (SYNTHESIS_ATTEMPTS, SynthesisError, _prompt_language,
+                                  _render_keyframes, _render_transcript, run_synthesize)
 
 LLM_SPEC = ModelSpec(name="llm-a", provider="p", default=True)
 
@@ -125,3 +126,36 @@ class TestRunSynthesize:
         run_synthesize(LLM_SPEC, _provider(), [], descriptions, "ru", tmp_path / "notes.md")
         content = fake_openai.chat.completions.calls[0]["messages"][1]["content"]
         assert "(transcript unavailable)" in content
+
+    def test_empty_answer_retried_then_written(self, tmp_path: Path, fake_openai,
+                                               monkeypatch: pytest.MonkeyPatch,
+                                               capsys: pytest.CaptureFixture) -> None:
+        """Пустой ответ провайдера повторяется, второй ответ доезжает до notes.md."""
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        fake_openai.set_replies(["", "# Конспект\n"])
+        out = tmp_path / "notes.md"
+        run_synthesize(LLM_SPEC, _provider(), [], {}, "ru", out)
+        assert out.read_text(encoding="utf-8") == "# Конспект"
+        assert len(fake_openai.chat.completions.calls) == SYNTHESIS_ATTEMPTS
+        assert "повтор запроса" in capsys.readouterr().out
+
+    def test_empty_answer_twice_raises_with_diagnostics(self, tmp_path: Path, fake_openai,
+                                                        monkeypatch: pytest.MonkeyPatch,
+                                                        capsys: pytest.CaptureFixture) -> None:
+        """Два пустых ответа — ошибка этапа с диагностикой; notes.md не создаётся."""
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        completions = fake_openai.chat.completions
+        completions.finish_reason = "length"
+        completions.reasoning = "долгие размышления"
+        fake_openai.set_replies(["", "   "])
+        out = tmp_path / "notes.md"
+        with pytest.raises(SynthesisError) as exc:
+            run_synthesize(LLM_SPEC, _provider(), [], {}, "ru", out)
+        message = str(exc.value)
+        assert "finish_reason=length" in message
+        assert "completion_tokens=123" in message
+        assert "reasoning_tokens=99" in message
+        assert "reasoning_content=18 симв." in message
+        assert "--skip-stt --skip-frames --skip-describe" in message
+        assert not out.exists()
+        assert capsys.readouterr().out.count("повтор запроса") == 1

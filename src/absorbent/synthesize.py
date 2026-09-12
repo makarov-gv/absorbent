@@ -32,6 +32,14 @@ SYSTEM_PROMPTS: dict[str, str] = {
 }
 
 
+# Число попыток синтеза: провайдер изредка отдаёт пустой ответ, повтор лечит разовый сбой.
+SYNTHESIS_ATTEMPTS = 2
+
+
+class SynthesisError(Exception):
+    """Ошибка этапа синтеза: модель не вернула текст конспекта."""
+
+
 def _prompt_language(output_language: str) -> str:
     """Язык промпта синтеза: всегда явный (ru/en), с запасом на 'ru'."""
     return output_language if output_language in SYSTEM_PROMPTS else "ru"
@@ -62,6 +70,26 @@ def _render_keyframes(descriptions: dict, images_prefix: str) -> str:
     return "\n".join(lines)
 
 
+def _answer_text(response: object) -> str:
+    """Текст ответа модели; пустая строка, если провайдер вернул пустой content."""
+    return (response.choices[0].message.content or "").strip()
+
+
+def _empty_answer_details(response: object) -> str:
+    """Диагностика пустого ответа: причина остановки, расход токенов и reasoning.
+
+    Ключ reasoning_content есть только у reasoning-моделей и приходит
+    необъявленным полем ответа, поэтому читается из model_extra.
+    """
+    choice = response.choices[0]
+    usage = getattr(response, "usage", None)
+    reasoning = (getattr(choice.message, "model_extra", None) or {}).get("reasoning_content") or ""
+    reasoning_tokens = getattr(getattr(usage, "completion_tokens_details", None), "reasoning_tokens", None)
+    return (f"finish_reason={choice.finish_reason}, "
+            f"completion_tokens={getattr(usage, 'completion_tokens', '?')}, "
+            f"reasoning_tokens={reasoning_tokens}, reasoning_content={len(reasoning)} симв.")
+
+
 def run_synthesize(llm_spec: ModelSpec, provider: Provider, transcript: list[dict],
                    descriptions: dict, output_language: str, out_md: Path,
                    images_prefix: str = "images/") -> Path:
@@ -72,6 +100,11 @@ def run_synthesize(llm_spec: ModelSpec, provider: Provider, transcript: list[dic
     только наш промпт, а не каприз модели. images_prefix — каталог картинок
     относительно итогового Markdown: в обычной раскладке 'images/', в плоском
     режиме '<имя>.images/'.
+
+    Пустой (или состоящий из пробелов) ответ модели — ошибка этапа: запрос
+    повторяется один раз, а при повторной пустоте поднимается SynthesisError
+    с диагностикой (finish_reason, расход токенов, длина reasoning), чтобы
+    конвейер не записал пустой notes.md и не собрал по нему HTML и PDF.
     """
     from openai import OpenAI
 
@@ -87,14 +120,25 @@ def run_synthesize(llm_spec: ModelSpec, provider: Provider, transcript: list[dic
 
     api_key = api_key_from(provider)
     client = OpenAI(base_url=provider.base_url, api_key=api_key)
-    response = client.chat.completions.create(
-        model=llm_spec.api_model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ],
-    )
-    text = (response.choices[0].message.content or "").strip()
+    text = ""
+    for attempt in range(SYNTHESIS_ATTEMPTS):
+        response = client.chat.completions.create(
+            model=llm_spec.api_model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+        )
+        text = _answer_text(response)
+        if text:
+            break
+        if attempt + 1 < SYNTHESIS_ATTEMPTS:
+            print("внимание: модель вернула пустой ответ, повтор запроса")
+    if not text:
+        raise SynthesisError(
+            f"модель не вернула текст конспекта ({_empty_answer_details(response)}); "
+            "повторите прогон по кэшу: --skip-stt --skip-frames --skip-describe"
+        )
     out_md.parent.mkdir(parents=True, exist_ok=True)
     out_md.write_text(text, encoding="utf-8")
     return out_md
