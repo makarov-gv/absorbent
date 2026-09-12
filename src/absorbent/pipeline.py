@@ -110,6 +110,11 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
         loaded = _load_json(descriptions_path)
         descriptions = loaded if isinstance(loaded, dict) else {}
 
+    # Описания кадров прошлого отбора в синтез не идут: иначе модель вставит ссылки на чужие кадры.
+    if keyframes:
+        wanted = {kf["image"] for kf in keyframes}
+        descriptions = {name: entry for name, entry in descriptions.items() if name in wanted}
+
     if not args.skip_synthesize:
         print(f"[{stem}] синтез Markdown...")
         llm_provider, llm_spec = cfg.resolve("llm", args.llm_model)

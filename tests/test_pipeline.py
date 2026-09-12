@@ -268,12 +268,17 @@ class TestHelpers:
         out_dir = tmp_path / "Лекция"
         cache = out_dir / ".absorbent"
         cache.mkdir(parents=True)
+        # В кэше два описания: кадр текущего отбора и кадр прошлого отбора,
+        # которого в keyframes уже нет; до синтеза доходит только первый.
         (cache / "descriptions.json").write_text(
-            json.dumps({"f.jpg": {"timestamp": "00:00:00", "description": "d"}}), encoding="utf-8")
+            json.dumps({"frame_00_00_00.jpg": {"timestamp": "00:00:00", "description": "текущий"},
+                        "frame_00_00_09.jpg": {"timestamp": "00:00:09", "description": "прошлый отбор"}}),
+            encoding="utf-8")
         args_namespace.skip_describe = True
         input_path = _input(tmp_path)
         process_file(input_path, cfg, args_namespace)
-        assert seen["descriptions"] == {"f.jpg": {"timestamp": "00:00:00", "description": "d"}}
+        assert seen["descriptions"] == {
+            "frame_00_00_00.jpg": {"timestamp": "00:00:00", "description": "текущий"}}
         monkeypatch.undo()
 
 
