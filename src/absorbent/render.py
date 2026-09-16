@@ -209,6 +209,21 @@ def render_pdf(notes_md: Path, out_pdf: Path, lang: str = "ru") -> None:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
 
 
+def outputs_up_to_date(notes_md: Path, out_html: Path, out_pdf: Path) -> bool:
+    """Готовы ли HTML и PDF: оба на месте и не старше notes.md.
+
+    Отсутствие любой из версий — повод пересобрать (прогон прервался на
+    pandoc или lualatex, либо постпроцессинг отключали флагом --skip-render).
+    Правка notes.md сдвигает её mtime, поэтому устаревшие версии тоже
+    пересобираются.
+    """
+    if not (out_html.exists() and out_pdf.exists()):
+        return False
+    notes_md = Path(notes_md)
+    stamp = notes_md.stat().st_mtime
+    return min(out_html.stat().st_mtime, out_pdf.stat().st_mtime) >= stamp
+
+
 def render_all(notes_md: Path, out_html: Path | None = None,
                out_pdf: Path | None = None, lang: str = "ru") -> tuple[Path, Path]:
     """Постпроцессинг: выровнять таблицы, собрать HTML и PDF.
@@ -218,7 +233,8 @@ def render_all(notes_md: Path, out_html: Path | None = None,
     как в раскладке <имя>/. Плоский режим передаёт <имя>.html и <имя>.pdf:
     относительные ссылки на картинки разрешает --resource-path по каталогу
     notes.md, поэтому имена файлов результата произвольны. `lang` — язык
-    конспекта (он же язык переносов в HTML и PDF).
+    конспекта (он же язык переносов в HTML и PDF). Пропуск уже собранных
+    версий — за вызывающей стороной (см. outputs_up_to_date).
     """
     notes_md = Path(notes_md)
     fmt_tables(notes_md)

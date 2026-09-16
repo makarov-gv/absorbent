@@ -178,8 +178,9 @@ class TestAudioFlatMode:
         transcript = json.loads((tmp_path / "lecture.json").read_text(encoding="utf-8"))
         assert [seg["text"] for seg in transcript] == ["Введение в тему", "Теперь формулы",
                                                        "Подводим итоги"]
-        # Кадров нет: у wav нет видеопотока, каталог изображений пуст.
-        assert not list((tmp_path / "lecture.images").glob("frame_*.jpg"))
+        # Кадров нет: у wav нет видеопотока, каталогов кадров не создаётся.
+        assert not (tmp_path / "lecture.images").exists()
+        assert not (tmp_path / ".absorbent" / "lecture" / "frames").exists()
         assert "lecture.images/" not in notes.read_text(encoding="utf-8")
         # Кэш — в <каталог>/.absorbent/<имя>/, каталога <имя>/ нет.
         cache = tmp_path / ".absorbent" / "lecture"

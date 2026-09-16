@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -64,7 +65,11 @@ def fake_stages(monkeypatch: pytest.MonkeyPatch) -> dict:
         state["calls"].append("render")
         state["render_paths"] = (out_html, out_pdf)
         state["render_lang"] = lang
-        return notes_md.with_name("notes.html"), notes_md.with_name("notes.pdf")
+        # Постпроцессинг в жизни создаёт обе версии: на их наличие и mtime
+        # опирается пропуск уже собранного (см. render.outputs_up_to_date).
+        for path in (out_html, out_pdf):
+            path.write_text("готово", encoding="utf-8")
+        return out_html, out_pdf
 
     def _has_video(input_path):
         # Наличие видеопотока не является этапом конвейера: в state["calls"]
@@ -125,12 +130,38 @@ class TestProcessFile:
                                      args_namespace) -> None:
         input_path = _input(tmp_path)
         process_file(input_path, cfg, args_namespace)
+        assert (tmp_path / "Лекция" / "notes.html").exists()
+        assert (tmp_path / "Лекция" / "notes.pdf").exists()
         fake_stages["calls"].clear()
         process_file(input_path, cfg, args_namespace)
-        # Без force отбор ключевых кадров пропускается (есть keyframes.json), а
-        # extract_frames/run_stt вызываются, но возвращают кэш внутри.
-        assert fake_stages["calls"] == ["extract", "stt:auto", "describe:ru:1", "synthesize:ru:1",
-                                        "render"]
+        # Без force отбор ключевых кадров пропускается (есть keyframes.json),
+        # extract_frames/run_stt/describe вызываются, но возвращают кэш внутри;
+        # синтез и постпроцессинг пропускаются целиком: notes.md на месте, а
+        # HTML и PDF не старше него.
+        assert fake_stages["calls"] == ["extract", "stt:auto", "describe:ru:1"]
+
+    def test_synthesis_from_cache_kept(self, tmp_path: Path, cfg, fake_stages: dict,
+                                       args_namespace, capsys: pytest.CaptureFixture) -> None:
+        """Готовый конспект не пересобирается: правка notes.md вручную переживает прогон."""
+        input_path = _input(tmp_path)
+        notes = process_file(input_path, cfg, args_namespace)
+        notes.write_text("# Правленый конспект\n", encoding="utf-8")
+        fake_stages["calls"].clear()
+        process_file(input_path, cfg, args_namespace)
+        assert "synthesize" not in " ".join(fake_stages["calls"])
+        assert notes.read_text(encoding="utf-8") == "# Правленый конспект\n"
+        assert "синтез пропущен" in capsys.readouterr().out
+
+    def test_render_reruns_when_notes_md_is_newer(self, tmp_path: Path, cfg, fake_stages: dict,
+                                                 args_namespace) -> None:
+        """Правка notes.md без --force пересобирает HTML и PDF."""
+        input_path = _input(tmp_path)
+        notes = process_file(input_path, cfg, args_namespace)
+        stale = (tmp_path / "Лекция" / "notes.html").stat().st_mtime
+        os.utime(notes, (stale + 10, stale + 10))
+        fake_stages["calls"].clear()
+        process_file(input_path, cfg, args_namespace)
+        assert fake_stages["calls"] == ["extract", "stt:auto", "describe:ru:1", "render"]
 
     def test_force_reruns_all(self, tmp_path: Path, cfg, fake_stages: dict, args_namespace) -> None:
         args_namespace.force = True
@@ -147,17 +178,21 @@ class TestProcessFile:
         input_path = _input(tmp_path)
         notes = process_file(input_path, cfg, args_namespace)
         assert fake_stages["calls"] == []
-        # Каталоги созданы, notes.md отсутствует.
+        # Каталог результата и кэш созданы, notes.md отсутствует.
         assert notes == tmp_path / "Лекция" / "notes.md"
+        assert notes.parent.is_dir()
         assert not notes.exists()
 
     def test_skip_stt_still_synthesizes(self, tmp_path: Path, cfg, fake_stages: dict,
                                         args_namespace) -> None:
-        # Первый прогон кэширует transcript.json, затем --skip-stt: синтез
-        # работает по кэшу транскрипта, язык результата не зависит от STT.
+        # Первый прогон кэширует transcript.json (синтез отключён), второй —
+        # с --skip-stt: синтез работает по кэшу транскрипта, язык результата
+        # не зависит от STT.
+        args_namespace.skip_synthesize = True
         input_path = _input(tmp_path)
         process_file(input_path, cfg, args_namespace)
         fake_stages["calls"].clear()
+        args_namespace.skip_synthesize = False
         args_namespace.skip_stt = True
         process_file(input_path, cfg, args_namespace)
         assert not any(c.startswith("stt:") for c in fake_stages["calls"])
@@ -166,8 +201,8 @@ class TestProcessFile:
 
     def test_skip_frames_with_cached_keyframes(self, tmp_path: Path, cfg, fake_stages: dict,
                                                args_namespace) -> None:
-        # Второй прогон без извлечения, но с кэшем keyframes.json: describe всё
-        # равно получает кадры из кэша.
+        # Второй прогон без извлечения кадров: из этапов остаётся только STT,
+        # остальное берётся из кэша.
         input_path = _input(tmp_path)
         process_file(input_path, cfg, args_namespace)
         fake_stages["calls"].clear()
@@ -175,7 +210,7 @@ class TestProcessFile:
         process_file(input_path, cfg, args_namespace)
         # Кадры не извлекаются; keyframes.json при этом не читается (skip),
         # поэтому describe не запускается, а готовые описания берутся из кэша.
-        assert fake_stages["calls"] == ["stt:auto", "synthesize:ru:1", "render"]
+        assert fake_stages["calls"] == ["stt:auto"]
 
     def test_hash_threshold_passed(self, tmp_path: Path, cfg, fake_stages: dict,
                                    args_namespace) -> None:
@@ -303,11 +338,10 @@ class TestFlatMode:
         assert not (tmp_path / "lecture").exists()
         # Префикс картинок для синтеза — <имя>.images/, а не images/.
         assert fake_stages["images_prefix"] == "lecture.images/"
-        # Постпроцессинг получает явные пути и печатает итог без хвоста (+ …).
+        # Постпроцессинг получает явные пути и печатает итог с их именами.
         assert fake_stages["render_paths"] == (tmp_path / "lecture.html", tmp_path / "lecture.pdf")
         out = capsys.readouterr().out
-        assert f"готово: {notes}" in out
-        assert "(+ notes.html" not in out
+        assert f"готово: {notes} (+ lecture.html, lecture.pdf)" in out
 
     def test_flat_with_output_dir(self, tmp_path: Path, cfg, fake_stages: dict,
                                   args_namespace) -> None:
@@ -322,11 +356,12 @@ class TestFlatMode:
         assert (tmp_path / ".absorbent" / "lecture" / "language.txt").exists()
         assert fake_stages["images_prefix"] == "lecture.images/"
 
-    def test_default_layout_passes_no_render_paths(self, tmp_path: Path, cfg, fake_stages: dict,
-                                                   args_namespace, capsys: pytest.CaptureFixture) -> None:
+    def test_default_layout_passes_render_paths(self, tmp_path: Path, cfg, fake_stages: dict,
+                                                args_namespace, capsys: pytest.CaptureFixture) -> None:
         process_file(_input(tmp_path), cfg, args_namespace)
         assert fake_stages["images_prefix"] == "images/"
-        assert fake_stages["render_paths"] == (None, None)
+        assert fake_stages["render_paths"] == (tmp_path / "Лекция" / "notes.html",
+                                               tmp_path / "Лекция" / "notes.pdf")
         assert "(+ notes.html, notes.pdf)" in capsys.readouterr().out
 
     def test_audio_input_skips_frame_stages(self, tmp_path: Path, cfg, fake_stages: dict,
@@ -341,3 +376,14 @@ class TestFlatMode:
         assert fake_stages["calls"] == ["stt:auto", "synthesize:ru:0", "render"]
         assert "кадров нет (аудио без видеопотока)" in capsys.readouterr().out
         assert notes.exists()
+
+    def test_audio_input_leaves_no_image_dirs(self, tmp_path: Path, cfg, fake_stages: dict,
+                                              args_namespace) -> None:
+        """У аудиовхода не появляется каталогов кадров — ни images/, ни frames/."""
+        fake_stages["video"] = False
+        process_file(_input(tmp_path, "lecture.mp3"), cfg, args_namespace)
+        out_dir = tmp_path / "lecture"
+        assert not (out_dir / "images").exists()
+        assert not (out_dir / ".absorbent" / "frames").exists()
+        # Служебный кэш при этом на месте: транскрипт и язык пишутся туда.
+        assert (out_dir / ".absorbent" / "language.txt").exists()

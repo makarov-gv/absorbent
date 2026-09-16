@@ -10,7 +10,7 @@ from absorbent.config import Config
 from absorbent.dedup import select_keyframes
 from absorbent.describe import describe_keyframes
 from absorbent.extract import extract_frames, has_video_stream
-from absorbent.render import render_all
+from absorbent.render import outputs_up_to_date, render_all
 from absorbent.synthesize import run_synthesize
 from absorbent.transcribe import run_stt
 
@@ -38,9 +38,14 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
     распознавание речи -> описание кадров -> синтез Markdown ->
     постпроцессинг (таблицы, HTML, PDF). Вход без видеопотока (аудиофайл)
     пропускает все этапы кадров: остаётся транскрипт и конспект без
-    иллюстраций. Каждый этап уважает свой `--skip-*` флаг и кэш в
-    `.absorbent/` (обход кэша — `--force`); постпроцессинг отключается
-    флагом `--skip-render`.
+    иллюстраций, а каталогов кадров (frames/ и images/) не появляется вовсе.
+
+    Признак готового этапа — его артефакт: transcript.json, keyframes.json,
+    descriptions.json, notes.md; постпроцессинг пропускается, когда HTML и
+    PDF не старше notes.md. Каждый этап уважает свой `--skip-*` флаг,
+    постпроцессинг отключается `--skip-render`, а полный перезапуск даёт
+    `--force` — он же нужен, если сменился `--output-language`: готовый
+    notes.md переиспользуется как есть.
 
     Язык распознавания речи (`--language`) и язык результата
     (`--output-language`) — независимые оси: первый лишь подсказывает whisper
@@ -67,10 +72,15 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
         transcript_path = cache / "transcript.json"
         images_dir = output_dir / "images"
         images_prefix = "images/"
+    html_path = notes_path.with_suffix(".html")
+    pdf_path = notes_path.with_suffix(".pdf")
     frames_dir = cache / "frames"
     keyframes_path = cache / "keyframes.json"
     descriptions_path = cache / "descriptions.json"
-    for directory in (output_dir, images_dir, cache, frames_dir):
+    # Конвейер заводит только каталоги результата и кэша: каталоги кадров
+    # (frames/ и images/) создают сами этапы кадров и только тогда, когда
+    # кадры есть, поэтому аудиовход не оставляет пустых каталогов картинок.
+    for directory in (output_dir, cache):
         directory.mkdir(parents=True, exist_ok=True)
 
     output_language = getattr(args, "output_language", "ru")
@@ -119,18 +129,17 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
         descriptions = {name: entry for name, entry in descriptions.items() if name in wanted}
 
     if not args.skip_synthesize:
-        print(f"[{stem}] синтез Markdown...")
-        llm_provider, llm_spec = cfg.resolve("llm", args.llm_model)
-        run_synthesize(llm_spec, llm_provider, transcript, descriptions, output_language,
-                       notes_path, images_prefix=images_prefix)
+        if notes_path.exists() and not args.force:
+            print(f"[{stem}] синтез пропущен: конспект уже есть (--force для пересборки)")
+        else:
+            print(f"[{stem}] синтез Markdown...")
+            llm_provider, llm_spec = cfg.resolve("llm", args.llm_model)
+            run_synthesize(llm_spec, llm_provider, transcript, descriptions, output_language,
+                           notes_path, images_prefix=images_prefix)
 
     if not getattr(args, "skip_render", False) and notes_path.exists():
-        print(f"[{stem}] постпроцессинг: таблицы, HTML, PDF...")
-        if flat:
-            render_all(notes_path, output_dir / f"{stem}.html", output_dir / f"{stem}.pdf",
-                       lang=output_language)
-            print(f"[{stem}] готово: {notes_path}")
-        else:
-            render_all(notes_path, lang=output_language)
-            print(f"[{stem}] готово: {notes_path} (+ notes.html, notes.pdf)")
+        if args.force or not outputs_up_to_date(notes_path, html_path, pdf_path):
+            print(f"[{stem}] постпроцессинг: таблицы, HTML, PDF...")
+            render_all(notes_path, html_path, pdf_path, lang=output_language)
+        print(f"[{stem}] готово: {notes_path} (+ {html_path.name}, {pdf_path.name})")
     return notes_path

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -20,6 +21,7 @@ from absorbent.render import (
     _page_css,
     _tool,
     fmt_tables,
+    outputs_up_to_date,
     render_all,
     render_html,
     render_pdf,
@@ -231,6 +233,39 @@ class TestRenderPdf:
         monkeypatch.setattr(subprocess, "run", _fake_run)
         render_pdf(notes, tmp_path / "notes.pdf")
         assert not any(c.startswith("title=") for c in seen["cmd"])
+
+
+class TestOutputsUpToDate:
+    """Признак готового постпроцессинга: обе версии есть и не старше notes.md."""
+
+    def _files(self, tmp_path: Path, notes_age: float, html_age: float, pdf_age: float,
+               make_pdf: bool = True) -> tuple[Path, Path, Path]:
+        notes = tmp_path / "notes.md"
+        html = tmp_path / "notes.html"
+        pdf = tmp_path / "notes.pdf"
+        notes.write_text("# x\n", encoding="utf-8")
+        html.write_text("x", encoding="utf-8")
+        if make_pdf:
+            pdf.write_text("x", encoding="utf-8")
+        os.utime(notes, (notes_age, notes_age))
+        os.utime(html, (html_age, html_age))
+        if make_pdf:
+            os.utime(pdf, (pdf_age, pdf_age))
+        return notes, html, pdf
+
+    def test_newer_versions_are_up_to_date(self, tmp_path: Path) -> None:
+        assert outputs_up_to_date(*self._files(tmp_path, 100.0, 200.0, 300.0))
+
+    def test_notes_newer_than_versions(self, tmp_path: Path) -> None:
+        assert not outputs_up_to_date(*self._files(tmp_path, 300.0, 200.0, 250.0))
+
+    def test_missing_pdf_forces_rebuild(self, tmp_path: Path) -> None:
+        assert not outputs_up_to_date(*self._files(tmp_path, 100.0, 200.0, 0.0, make_pdf=False))
+
+    def test_missing_html_forces_rebuild(self, tmp_path: Path) -> None:
+        notes, html, pdf = self._files(tmp_path, 100.0, 200.0, 300.0)
+        html.unlink()
+        assert not outputs_up_to_date(notes, html, pdf)
 
 
 class TestRenderAll:
