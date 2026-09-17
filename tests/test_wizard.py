@@ -16,11 +16,13 @@ from absorbent.wizard import (
     Console,
     TtyConsole,
     _ask_number,
+    _button_app,
     _checkbox_app,
     _choose_input,
     _choose_slides,
     _EnterConfirmsRadioList,
     _input_app,
+    _message_app,
     _number_check,
     _radio_app,
     run_wizard,
@@ -504,22 +506,21 @@ class TestTtyConsole:
         import absorbent.wizard as wizard_module
 
         yes_first = _Recorder(True)
-        monkeypatch.setattr(wizard_module, "button_dialog", yes_first)
+        monkeypatch.setattr(wizard_module, "_button_app", yes_first)
         assert TtyConsole().confirm("Запуск", "текст", default=True) is True
-        assert yes_first.kwargs()["buttons"] == [("Да", True), ("Нет", False)]
+        assert yes_first.calls[0][0] == ("Запуск", "текст", [("Да", True), ("Нет", False)])
         no_first = _Recorder(False)
-        monkeypatch.setattr(wizard_module, "button_dialog", no_first)
+        monkeypatch.setattr(wizard_module, "_button_app", no_first)
         assert TtyConsole().confirm("Запуск", "текст", default=False) is False
-        assert no_first.kwargs()["buttons"] == [("Нет", False), ("Да", True)]
+        assert no_first.calls[0][0] == ("Запуск", "текст", [("Нет", False), ("Да", True)])
 
-    def test_message_uses_ok_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_message_uses_message_app(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import absorbent.wizard as wizard_module
 
-        dialog = _Recorder(None)
-        monkeypatch.setattr(wizard_module, "message_dialog", dialog)
+        app = _Recorder(None)
+        monkeypatch.setattr(wizard_module, "_message_app", app)
         TtyConsole().message("Ошибка", "текст ошибки")
-        assert dialog.kwargs()["title"] == "Ошибка"
-        assert dialog.kwargs()["text"] == "текст ошибки"
+        assert app.calls[0][0] == ("Ошибка", "текст ошибки")
 
 
 class RecordingButton(Button):
@@ -563,13 +564,15 @@ class RecordingTextArea(TextArea):
 
 
 class _FakeApp:
-    """Подделка Application: запоминает результаты exit()."""
+    """Подделка Application: запоминает результаты и исключения exit()."""
 
     def __init__(self) -> None:
         self.results: list = []
+        self.exceptions: list = []
 
-    def exit(self, result=None) -> None:
+    def exit(self, result=None, exception=None) -> None:
         self.results.append(result)
+        self.exceptions.append(exception)
 
 
 @pytest.fixture
@@ -810,4 +813,51 @@ class TestInputApp:
         fake = _FakeApp()
         monkeypatch.setattr(wizard_module, "get_app", lambda: fake)
         buttons[1].handler()
+        assert fake.results == [None]
+
+
+class TestDialogApps:
+    """Клавиши общих диалогов мастера: Ctrl-C прерывает, Enter возвращает ответ."""
+
+    def test_ctrl_c_aborts_every_dialog(self, buttons: list[RecordingButton],
+                                        monkeypatch: pytest.MonkeyPatch) -> None:
+        from prompt_toolkit.completion import PathCompleter
+
+        import absorbent.wizard as wizard_module
+
+        apps = [
+            _radio_app("Язык", "текст", [("ru", "Русский")], default="ru"),
+            _checkbox_app("Слайды", "текст", [("a", "A")]),
+            _input_app("Путь", "текст", "/tmp/", PathCompleter(), None),
+            _button_app("Запуск", "текст", [("Да", True)]),
+            _message_app("Ошибка", "текст"),
+        ]
+        for app in apps:
+            fake = _FakeApp()
+            monkeypatch.setattr(wizard_module, "get_app", lambda fake=fake: fake)
+            binding = app.key_bindings.get_bindings_for_keys(("c-c",))[0]
+            binding.handler(None)
+            assert fake.exceptions == [KeyboardInterrupt]
+            assert fake.results == [None]
+
+    def test_button_app_returns_focused_button(self, buttons: list[RecordingButton],
+                                               monkeypatch: pytest.MonkeyPatch) -> None:
+        import absorbent.wizard as wizard_module
+
+        _button_app("Запуск", "текст", [("Да", True), ("Нет", False)])
+        fake = _FakeApp()
+        monkeypatch.setattr(wizard_module, "get_app", lambda: fake)
+        assert [button.text for button in buttons] == ["Да", "Нет"]
+        buttons[1].handler()
+        assert fake.results == [False]
+
+    def test_message_app_dismisses(self, buttons: list[RecordingButton],
+                                   monkeypatch: pytest.MonkeyPatch) -> None:
+        import absorbent.wizard as wizard_module
+
+        _message_app("Ошибка", "текст ошибки")
+        fake = _FakeApp()
+        monkeypatch.setattr(wizard_module, "get_app", lambda: fake)
+        assert [button.text for button in buttons] == ["Понятно"]
+        buttons[0].handler()
         assert fake.results == [None]

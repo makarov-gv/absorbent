@@ -25,7 +25,6 @@ from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import Completer, PathCompleter
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import HSplit, Layout
-from prompt_toolkit.shortcuts import button_dialog, message_dialog
 from prompt_toolkit.validation import Validator
 from prompt_toolkit.widgets import (
     Button,
@@ -96,6 +95,57 @@ class Console(ABC):
         """Сообщение об ошибке ввода (ждёт Enter)."""
 
 
+def _abort() -> None:
+    """Ctrl-C в диалоге: прервать мастер целиком (см. run_wizard)."""
+    get_app().exit(exception=KeyboardInterrupt)
+
+
+def _dialog_app(dialog: Dialog, keys: KeyBindings | None = None) -> Application:
+    """Приложение диалога мастера: клавиши диалога плюс Ctrl-C везде.
+
+    Ctrl-C в prompt_toolkit-диалоге сам по себе ничего не делает: терминал в
+    raw-режиме не посылает SIGINT, а байт \\x03 остаётся необработанной
+    клавишей, и мастер выглядел бы зависшим. Ctrl-C привязывается здесь для
+    всех диалогов мастера, включая «да/нет» и сообщения: они тоже собраны на
+    этом помощнике.
+    """
+    bindings = keys if keys is not None else KeyBindings()
+    bindings.add("c-c")(lambda event: _abort())
+    return Application(layout=Layout(dialog), key_bindings=bindings, mouse_support=True,
+                       full_screen=True)
+
+
+def _message_app(title: str, text: str) -> Application:
+    """Сообщение об ошибке ввода: Enter (или кнопка) закрывает диалог."""
+
+    def dismiss() -> None:
+        get_app().exit(result=None)
+
+    dialog = Dialog(
+        title=title,
+        body=HSplit([Label(text=text, dont_extend_height=True)]),
+        buttons=[Button(text="Понятно", handler=dismiss)],
+        with_background=True,
+    )
+    return _dialog_app(dialog)
+
+
+def _button_app(title: str, text: str, buttons: list[tuple[str, bool]]) -> Application:
+    """Вопрос с кнопками: Enter возвращает результат кнопки в фокусе."""
+
+    def choose(result: bool) -> None:
+        get_app().exit(result=result)
+
+    dialog = Dialog(
+        title=title,
+        body=HSplit([Label(text=text, dont_extend_height=True)]),
+        buttons=[Button(text=label, handler=lambda result=result: choose(result))
+                 for label, result in buttons],
+        with_background=True,
+    )
+    return _dialog_app(dialog)
+
+
 def _checkbox_app(title: str, text: str, values: list[tuple[str, str]],
                   defaults: Sequence[str] = ()) -> Application:
     """Диалог множественного выбора: Enter и пробел — отметка, Esc — подтвердить.
@@ -124,8 +174,7 @@ def _checkbox_app(title: str, text: str, values: list[tuple[str, str]],
     )
     keys = KeyBindings()
     keys.add("escape")(lambda event: confirm())
-    return Application(layout=Layout(dialog), key_bindings=keys, mouse_support=True,
-                       full_screen=True)
+    return _dialog_app(dialog, keys)
 
 
 class _EnterConfirmsRadioList(RadioList):
@@ -162,8 +211,7 @@ def _radio_app(title: str, text: str, values: list[tuple[str, str]],
     )
     keys = KeyBindings()
     keys.add("escape")(lambda event: cancel())
-    return Application(layout=Layout(dialog), key_bindings=keys, mouse_support=True,
-                       full_screen=True)
+    return _dialog_app(dialog, keys)
 
 
 def _input_app(title: str, text: str, default: str, completer: Completer,
@@ -206,8 +254,7 @@ def _input_app(title: str, text: str, default: str, completer: Completer,
     )
     keys = KeyBindings()
     keys.add("escape")(lambda event: cancel())
-    return Application(layout=Layout(dialog), key_bindings=keys, mouse_support=True,
-                       full_screen=True)
+    return _dialog_app(dialog, keys)
 
 
 class TtyConsole(Console):
@@ -235,10 +282,10 @@ class TtyConsole(Console):
         yes = ("Да", True)
         no = ("Нет", False)
         buttons = [yes, no] if default else [no, yes]
-        return bool(button_dialog(title=title, text=text, buttons=buttons).run())
+        return bool(_button_app(title, text, buttons).run())
 
     def message(self, title, text):
-        message_dialog(title=title, text=text, ok_text="Понятно").run()
+        _message_app(title, text).run()
 
 
 def _number_check(low: float, high: float,
