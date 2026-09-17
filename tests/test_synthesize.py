@@ -7,9 +7,15 @@ from pathlib import Path
 import pytest
 
 from absorbent.config import ModelSpec, Provider
-from absorbent.synthesize import (SYNTHESIS_ATTEMPTS, SynthesisError, _prompt_language,
-                                  _render_keyframes, _render_slides, _render_transcript,
-                                  run_synthesize)
+from absorbent.synthesize import (
+    SYNTHESIS_ATTEMPTS,
+    SynthesisError,
+    _prompt_language,
+    _render_keyframes,
+    _render_slides,
+    _render_transcript,
+    run_synthesize,
+)
 
 LLM_SPEC = ModelSpec(name="llm-a", provider="p", default=True)
 

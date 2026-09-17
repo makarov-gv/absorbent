@@ -137,7 +137,6 @@ class TestMain:
         video.write_bytes(b"x")
         deck = tmp_path / "deck.pdf"
         deck.write_bytes(b"%PDF")
-        config = _write_config(tmp_path)
         seen: dict = {}
 
         def _fake_process(input_path, cfg, args):

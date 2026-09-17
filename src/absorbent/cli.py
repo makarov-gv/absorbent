@@ -6,7 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from absorbent.config import ConfigError, load_config
+from absorbent.config import Config, ConfigError, load_config
 from absorbent.slides import SlidesError, resolve_slide_sources
 
 # Расширения, обрабатываемые при передаче директории на вход.
