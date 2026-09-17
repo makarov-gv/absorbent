@@ -157,3 +157,20 @@ class TestApiKey:
     def test_present_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ABSORBENT_TEST_KEY", "sekret")
         assert api_key_from(Provider(name="p", base_url="u", api_key_env="ABSORBENT_TEST_KEY")) == "sekret"
+
+
+class TestDefaultName:
+    def test_repo_config_defaults(self) -> None:
+        cfg = _repo_cfg()
+        assert cfg.default_name("stt") == "whisper-turbo"
+        assert cfg.default_name("vision") == "deepseek-v4-flash-vision-exp"
+        assert cfg.default_name("llm") == "deepseek-v4-flash"
+
+    def test_none_without_default(self, tmp_path: Path) -> None:
+        path = tmp_path / "config.yaml"
+        path.write_text("providers:\n  p: {base_url: u}\nllm:\n  m1: {provider: p}\n",
+                        encoding="utf-8")
+        assert load_config(str(path)).default_name("llm") is None
+
+    def test_none_for_empty_category(self) -> None:
+        assert Config().default_name("vision") is None

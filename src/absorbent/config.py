@@ -54,14 +54,20 @@ class Config:
     vision: dict[str, ModelSpec] = field(default_factory=dict)
     llm: dict[str, ModelSpec] = field(default_factory=dict)
 
+    def default_name(self, category: str) -> str | None:
+        """Имя модели категории с default: true (или None, если дефолта нет)."""
+        for spec in getattr(self, category).values():
+            if spec.default:
+                return spec.name
+        return None
+
     def resolve(self, category: str, name: str | None = None) -> tuple[Provider, ModelSpec]:
         """Вернуть (provider, spec) для имени или дефолта категории."""
         table = getattr(self, category)
         if name is None:
-            for spec in table.values():
-                if spec.default:
-                    return self._provider_for(spec), spec
-            raise ConfigError(f"в категории '{category}' не задана модель с default: true")
+            name = self.default_name(category)
+            if name is None:
+                raise ConfigError(f"в категории '{category}' не задана модель с default: true")
         if name not in table:
             valid = ", ".join(table) or "(нет моделей)"
             raise ConfigError(f"неизвестная модель '{name}' в категории '{category}'; доступны: {valid}")
