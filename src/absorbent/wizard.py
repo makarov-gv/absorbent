@@ -3,6 +3,14 @@
 Мастер обрабатывает одну запись за раз и возвращает готовую командную строку
 (список аргументов без имени программы): cli.main переразбирает её тем же
 парсером, поэтому напечатанную сводку можно скопировать в терминал.
+
+Штатные диалоги prompt_toolkit не годятся в качестве управления мастером:
+radiolist_dialog по Enter только запоминает пункт (закрывает его кнопка
+«Готово»), input_dialog по Enter лишь переводит фокус на кнопку, а Esc не
+отменяет ни то, ни другое. Поэтому диалоги списков и ввода собраны здесь:
+Enter возвращает выбор сразу, Esc отменяет шаг (None), а Ctrl-C отменяет
+мастер целиком. Диалоги «да/нет» и сообщений взяты штатными: там фокус сразу
+на кнопке ответа, и Enter возвращает её.
 """
 
 from __future__ import annotations
@@ -13,17 +21,21 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from prompt_toolkit.application import Application, get_app
-from prompt_toolkit.completion import PathCompleter
+from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.completion import Completer, PathCompleter
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import HSplit, Layout
-from prompt_toolkit.shortcuts import (
-    button_dialog,
-    input_dialog,
-    message_dialog,
-    radiolist_dialog,
-)
+from prompt_toolkit.shortcuts import button_dialog, message_dialog
 from prompt_toolkit.validation import Validator
-from prompt_toolkit.widgets import Button, CheckboxList, Dialog, Label
+from prompt_toolkit.widgets import (
+    Button,
+    CheckboxList,
+    Dialog,
+    Label,
+    RadioList,
+    TextArea,
+    ValidationToolbar,
+)
 
 from absorbent.cli import MEDIA_EXTENSIONS
 from absorbent.config import Config
@@ -73,11 +85,11 @@ class Console(ABC):
              only_directories: bool = False,
              validator: Callable[[str], bool] | None = None,
              error_message: str = "") -> str | None:
-        """Ввод строки с автодополнением пути; None — отмена."""
+        """Ввод строки с автодополнением пути; пустой ввод — default; None — отмена."""
 
     @abstractmethod
     def confirm(self, title: str, text: str, default: bool = True) -> bool:
-        """Вопрос да/нет; Enter подтверждает вариант по умолчанию."""
+        """Вопрос да/нет; Enter подтверждает вариант по умолчанию (Esc не отменяет)."""
 
     @abstractmethod
     def message(self, title: str, text: str) -> None:
@@ -116,12 +128,93 @@ def _checkbox_app(title: str, text: str, values: list[tuple[str, str]],
                        full_screen=True)
 
 
+class _EnterConfirmsRadioList(RadioList):
+    """Список одиночного выбора, подтверждающий выбор по Enter.
+
+    Штатный radiolist_dialog по Enter только запоминает текущий пункт, а
+    закрывается кнопкой «Готово»: пользователь, нажавший Enter, видит, что
+    ничего не произошло. Enter (как и пробел, и клик) возвращает выбранный
+    пункт сразу.
+    """
+
+    def _handle_enter(self) -> None:
+        super()._handle_enter()
+        get_app().exit(result=self.current_value)
+
+
+def _radio_app(title: str, text: str, values: list[tuple[str, str]],
+               default: str | None = None) -> Application:
+    """Диалог одиночного выбора: стрелки двигают, Enter подтверждает, Esc — отмена."""
+
+    def cancel() -> None:
+        get_app().exit(result=None)
+
+    dialog = Dialog(
+        title=title,
+        body=HSplit([
+            Label(text=text, dont_extend_height=True),
+            _EnterConfirmsRadioList(values, default=default),
+            Label(text="Стрелки — выбор, Enter — подтвердить, Esc — отмена.",
+                  dont_extend_height=True),
+        ]),
+        buttons=[Button(text="Отмена", handler=cancel)],
+        with_background=True,
+    )
+    keys = KeyBindings()
+    keys.add("escape")(lambda event: cancel())
+    return Application(layout=Layout(dialog), key_bindings=keys, mouse_support=True,
+                       full_screen=True)
+
+
+def _input_app(title: str, text: str, default: str, completer: Completer,
+               validator: Validator | None) -> Application:
+    """Диалог ввода строки: Enter возвращает текст, Esc — отмена.
+
+    Штатный input_dialog по Enter лишь переводит фокус на кнопку «Готово»
+    (нужно нажать Enter дважды), а Esc не отменяет ввод. Неверный ввод сюда не
+    проходит: валидатор показывает сообщение, диалог остаётся открытым.
+
+    Поле не заполняется значением по умолчанию: курсор в TextArea стоит в
+    начале, поэтому набранное приписывалось бы к готовому тексту и «5»
+    превращалось бы в «15». Пустой ввод означает «оставить значение по
+    умолчанию», о нём сообщает подсказка под вопросом.
+    """
+    def resolve(raw: str) -> None:
+        get_app().exit(result=raw or default)
+
+    def accept(buffer: Buffer) -> bool:
+        resolve(buffer.text)
+        return True
+
+    def cancel() -> None:
+        get_app().exit(result=None)
+
+    field = TextArea(multiline=False, completer=completer, validator=validator,
+                     accept_handler=accept)
+    hint = f"Пусто — оставить «{default}»." if default else ""
+    dialog = Dialog(
+        title=title,
+        body=HSplit([
+            Label(text=text, dont_extend_height=True),
+            field,
+            Label(text=hint, dont_extend_height=True),
+            ValidationToolbar(),
+        ]),
+        buttons=[Button(text="Готово", handler=lambda: resolve(field.text)),
+                 Button(text="Отмена", handler=cancel)],
+        with_background=True,
+    )
+    keys = KeyBindings()
+    keys.add("escape")(lambda event: cancel())
+    return Application(layout=Layout(dialog), key_bindings=keys, mouse_support=True,
+                       full_screen=True)
+
+
 class TtyConsole(Console):
     """Диалоги prompt_toolkit: списки, чекбоксы, ввод пути с автодополнением."""
 
     def select(self, title, text, values, default=None):
-        return radiolist_dialog(title=title, text=text, values=values, default=default,
-                                ok_text="Готово", cancel_text="Отмена").run()
+        return _radio_app(title, text, values, default).run()
 
     def select_many(self, title, text, values, defaults=()):
         return _checkbox_app(title, text, values, defaults).run()
@@ -129,10 +222,12 @@ class TtyConsole(Console):
     def text(self, title, text, default="", only_directories=False, validator=None,
              error_message=""):
         completer = PathCompleter(expanduser=True, only_directories=only_directories)
-        return input_dialog(title=title, text=text, default=default, completer=completer,
-                            validator=(None if validator is None
-                                       else Validator.from_callable(validator, error_message)),
-                            ok_text="Готово", cancel_text="Отмена").run()
+        # Пустой ввод означает значение по умолчанию, поэтому проверять нужно и
+        # его: иначе Enter на пустом поле не прошёл бы собственный валидатор.
+        checked = (None if validator is None
+                   else Validator.from_callable(lambda raw: bool(validator(raw or default)),
+                                                error_message))
+        return _input_app(title, text, default, completer, checked).run()
 
     def confirm(self, title, text, default=True):
         # Порядок кнопок задаёт вариант по умолчанию: первая кнопка в фокусе,

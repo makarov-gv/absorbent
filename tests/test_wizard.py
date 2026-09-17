@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 from prompt_toolkit.document import Document
 from prompt_toolkit.validation import ValidationError
-from prompt_toolkit.widgets import Button, CheckboxList
+from prompt_toolkit.widgets import Button, CheckboxList, TextArea
 
 from absorbent.config import load_config
 from absorbent.wizard import (
@@ -20,7 +20,10 @@ from absorbent.wizard import (
     _checkbox_app,
     _choose_input,
     _choose_slides,
+    _EnterConfirmsRadioList,
+    _input_app,
     _number_check,
+    _radio_app,
     run_wizard,
 )
 
@@ -454,17 +457,14 @@ class _Recorder:
 
 
 class TestTtyConsole:
-    def test_select_passes_values_and_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_select_uses_radio_app(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import absorbent.wizard as wizard_module
 
-        radio = _Recorder("ru")
-        monkeypatch.setattr(wizard_module, "radiolist_dialog", radio)
+        app = _Recorder("ru")
+        monkeypatch.setattr(wizard_module, "_radio_app", app)
         values = [("ru", "Русский"), ("en", "English")]
         assert TtyConsole().select("Язык конспекта", "текст", values, default="ru") == "ru"
-        assert radio.kwargs()["title"] == "Язык конспекта"
-        assert radio.kwargs()["values"] == values
-        assert radio.kwargs()["default"] == "ru"
-        assert radio.kwargs()["cancel_text"] == "Отмена"
+        assert app.calls[0][0] == ("Язык конспекта", "текст", values, "ru")
 
     def test_select_many_uses_checkbox_app(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import absorbent.wizard as wizard_module
@@ -478,25 +478,26 @@ class TestTtyConsole:
     def test_text_wires_path_completer(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import absorbent.wizard as wizard_module
 
-        dialog = _Recorder("/tmp")
-        monkeypatch.setattr(wizard_module, "input_dialog", dialog)
+        app = _Recorder("/tmp")
+        monkeypatch.setattr(wizard_module, "_input_app", app)
         assert TtyConsole().text("Файл", "текст", default="/tmp/", only_directories=True) == "/tmp"
-        kwargs = dialog.kwargs()
-        assert kwargs["default"] == "/tmp/"
-        assert kwargs["completer"].expanduser is True
-        assert kwargs["completer"].only_directories is True
-        assert kwargs["validator"] is None
+        args = app.calls[0][0]
+        assert args[:3] == ("Файл", "текст", "/tmp/")
+        assert args[3].expanduser is True
+        assert args[3].only_directories is True
+        assert args[4] is None  # валидатора нет.
 
-    def test_text_builds_validator_from_callable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_text_validator_accepts_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Валидатор проверяет и значение по умолчанию: Enter на пустом поле проходит."""
         import absorbent.wizard as wizard_module
 
-        dialog = _Recorder("5")
-        monkeypatch.setattr(wizard_module, "input_dialog", dialog)
-        console = TtyConsole()
-        console.text("Число", "текст", validator=lambda text: text.isdigit(),
-                     error_message="нужно число")
-        validator = dialog.kwargs()["validator"]
-        validator.validate(Document("5"))  # корректный ввод валидатор пропускает.
+        app = _Recorder("5")
+        monkeypatch.setattr(wizard_module, "_input_app", app)
+        TtyConsole().text("Число", "текст", default="5", validator=lambda text: text.isdigit(),
+                          error_message="нужно число")
+        validator = app.calls[0][0][4]
+        validator.validate(Document(""))  # пусто -> проверяется default "5".
+        validator.validate(Document("7"))
         with pytest.raises(ValidationError):
             validator.validate(Document("abc"))
 
@@ -542,6 +543,26 @@ class RecordingCheckboxList(CheckboxList):
         RecordingCheckboxList.instances.append(self)
 
 
+class RecordingRadioList(_EnterConfirmsRadioList):
+    """Список мастера, запоминающий экземпляры: виджеты не видны в дереве контейнеров."""
+
+    instances: list["RecordingRadioList"] = []
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        RecordingRadioList.instances.append(self)
+
+
+class RecordingTextArea(TextArea):
+    """TextArea, запоминающий экземпляры, чтобы добраться до его буфера."""
+
+    instances: list["RecordingTextArea"] = []
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        RecordingTextArea.instances.append(self)
+
+
 class _FakeApp:
     """Подделка Application: запоминает результаты exit()."""
 
@@ -552,23 +573,43 @@ class _FakeApp:
         self.results.append(result)
 
 
+@pytest.fixture
+def buttons(monkeypatch: pytest.MonkeyPatch) -> list[RecordingButton]:
+    import absorbent.wizard as wizard_module
+
+    RecordingButton.instances = []
+    monkeypatch.setattr(wizard_module, "Button", RecordingButton)
+    return RecordingButton.instances
+
+
+@pytest.fixture
+def listboxes(monkeypatch: pytest.MonkeyPatch) -> list[RecordingCheckboxList]:
+    import absorbent.wizard as wizard_module
+
+    RecordingCheckboxList.instances = []
+    monkeypatch.setattr(wizard_module, "CheckboxList", RecordingCheckboxList)
+    return RecordingCheckboxList.instances
+
+
+@pytest.fixture
+def radios(monkeypatch: pytest.MonkeyPatch) -> list[RecordingRadioList]:
+    import absorbent.wizard as wizard_module
+
+    RecordingRadioList.instances = []
+    monkeypatch.setattr(wizard_module, "_EnterConfirmsRadioList", RecordingRadioList)
+    return RecordingRadioList.instances
+
+
+@pytest.fixture
+def fields(monkeypatch: pytest.MonkeyPatch) -> list[RecordingTextArea]:
+    import absorbent.wizard as wizard_module
+
+    RecordingTextArea.instances = []
+    monkeypatch.setattr(wizard_module, "TextArea", RecordingTextArea)
+    return RecordingTextArea.instances
+
+
 class TestCheckboxApp:
-    @pytest.fixture
-    def buttons(self, monkeypatch: pytest.MonkeyPatch) -> list[RecordingButton]:
-        import absorbent.wizard as wizard_module
-
-        RecordingButton.instances = []
-        monkeypatch.setattr(wizard_module, "Button", RecordingButton)
-        return RecordingButton.instances
-
-    @pytest.fixture
-    def listboxes(self, monkeypatch: pytest.MonkeyPatch) -> list[RecordingCheckboxList]:
-        import absorbent.wizard as wizard_module
-
-        RecordingCheckboxList.instances = []
-        monkeypatch.setattr(wizard_module, "CheckboxList", RecordingCheckboxList)
-        return RecordingCheckboxList.instances
-
     def test_checkbox_holds_values_and_defaults(self, buttons: list[RecordingButton],
                                                 listboxes: list[RecordingCheckboxList]) -> None:
         values = [("a", "A"), ("b", "B")]
@@ -640,3 +681,134 @@ class TestNumberInput:
         assert [question[0] for question in NUMBER_QUESTIONS] == [
             "--fps", "--hash-threshold", "--min-scene-seconds", "--slides-dpi"]
         assert all(len(question) == 6 for question in NUMBER_QUESTIONS)
+
+
+class TestRadioApp:
+    def test_list_holds_values_and_default(self, buttons: list[RecordingButton],
+                                           radios: list[RecordingRadioList]) -> None:
+        values = [("ru", "Русский"), ("en", "English")]
+        _radio_app("Язык", "текст", values, default="en")
+        assert radios[0].values == values
+        assert radios[0].current_value == "en"
+        assert [button.text for button in buttons] == ["Отмена"]
+
+    def test_enter_confirms_focused_item(self, buttons: list[RecordingButton],
+                                         radios: list[RecordingRadioList],
+                                         monkeypatch: pytest.MonkeyPatch) -> None:
+        import absorbent.wizard as wizard_module
+
+        values = [("ru", "Русский"), ("en", "English")]
+        _radio_app("Язык", "текст", values, default="ru")
+        fake = _FakeApp()
+        monkeypatch.setattr(wizard_module, "get_app", lambda: fake)
+        radios[0]._selected_index = 1
+        radios[0]._handle_enter()  # обработчик Enter в списке.
+        assert fake.results == ["en"]
+
+    def test_escape_cancels(self, buttons: list[RecordingButton],
+                            radios: list[RecordingRadioList],
+                            monkeypatch: pytest.MonkeyPatch) -> None:
+        import absorbent.wizard as wizard_module
+
+        app = _radio_app("Язык", "текст", [("ru", "Русский")], default="ru")
+        fake = _FakeApp()
+        monkeypatch.setattr(wizard_module, "get_app", lambda: fake)
+        binding = app.key_bindings.get_bindings_for_keys(("escape",))[0]
+        binding.handler(None)
+        assert fake.results == [None]
+
+    def test_cancel_button_returns_none(self, buttons: list[RecordingButton],
+                                        radios: list[RecordingRadioList],
+                                        monkeypatch: pytest.MonkeyPatch) -> None:
+        import absorbent.wizard as wizard_module
+
+        _radio_app("Язык", "текст", [("ru", "Русский")], default="ru")
+        fake = _FakeApp()
+        monkeypatch.setattr(wizard_module, "get_app", lambda: fake)
+        buttons[0].handler()
+        assert fake.results == [None]
+
+
+class TestInputApp:
+    def test_field_is_single_line_with_completer(self, buttons: list[RecordingButton],
+                                                 fields: list[RecordingTextArea]) -> None:
+        from prompt_toolkit.completion import PathCompleter
+        from prompt_toolkit.validation import Validator
+
+        completer = PathCompleter(expanduser=True)
+        validator = Validator.from_callable(lambda text: text.isdigit(), "нужно число")
+        _input_app("Число", "текст", "5", completer, validator)
+        field = fields[0]
+        # Поле не предзаполняется: иначе набранное приклеилось бы к «5».
+        assert field.text == ""
+        assert field.completer is completer
+        assert field.validator is validator
+        assert [button.text for button in buttons] == ["Готово", "Отмена"]
+
+    def test_enter_returns_typed_text(self, buttons: list[RecordingButton],
+                                      fields: list[RecordingTextArea],
+                                      monkeypatch: pytest.MonkeyPatch) -> None:
+        from prompt_toolkit.completion import PathCompleter
+
+        import absorbent.wizard as wizard_module
+
+        _input_app("Число", "текст", "5", PathCompleter(), None)
+        fake = _FakeApp()
+        monkeypatch.setattr(wizard_module, "get_app", lambda: fake)
+        fields[0].text = "7"
+        fields[0].buffer.accept_handler(fields[0].buffer)  # обработчик Enter в поле.
+        assert fake.results == ["7"]
+
+    def test_enter_with_empty_field_keeps_default(self, buttons: list[RecordingButton],
+                                                  fields: list[RecordingTextArea],
+                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+        from prompt_toolkit.completion import PathCompleter
+
+        import absorbent.wizard as wizard_module
+
+        _input_app("Число", "текст", "5", PathCompleter(), None)
+        fake = _FakeApp()
+        monkeypatch.setattr(wizard_module, "get_app", lambda: fake)
+        fields[0].buffer.accept_handler(fields[0].buffer)
+        assert fake.results == ["5"]
+
+    def test_ready_button_returns_field_text(self, buttons: list[RecordingButton],
+                                             fields: list[RecordingTextArea],
+                                             monkeypatch: pytest.MonkeyPatch) -> None:
+        from prompt_toolkit.completion import PathCompleter
+
+        import absorbent.wizard as wizard_module
+
+        _input_app("Путь", "текст", "/tmp/", PathCompleter(), None)
+        fake = _FakeApp()
+        monkeypatch.setattr(wizard_module, "get_app", lambda: fake)
+        fields[0].text = "/home/"
+        buttons[0].handler()
+        assert fake.results == ["/home/"]
+
+    def test_escape_cancels(self, buttons: list[RecordingButton],
+                            fields: list[RecordingTextArea],
+                            monkeypatch: pytest.MonkeyPatch) -> None:
+        from prompt_toolkit.completion import PathCompleter
+
+        import absorbent.wizard as wizard_module
+
+        app = _input_app("Путь", "текст", "/tmp/", PathCompleter(), None)
+        fake = _FakeApp()
+        monkeypatch.setattr(wizard_module, "get_app", lambda: fake)
+        binding = app.key_bindings.get_bindings_for_keys(("escape",))[0]
+        binding.handler(None)
+        assert fake.results == [None]
+
+    def test_cancel_button_returns_none(self, buttons: list[RecordingButton],
+                                        fields: list[RecordingTextArea],
+                                        monkeypatch: pytest.MonkeyPatch) -> None:
+        from prompt_toolkit.completion import PathCompleter
+
+        import absorbent.wizard as wizard_module
+
+        _input_app("Путь", "текст", "/tmp/", PathCompleter(), None)
+        fake = _FakeApp()
+        monkeypatch.setattr(wizard_module, "get_app", lambda: fake)
+        buttons[1].handler()
+        assert fake.results == [None]
