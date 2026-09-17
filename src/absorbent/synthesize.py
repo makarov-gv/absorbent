@@ -16,7 +16,10 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "($...$), хронологический порядок. Вставляй изображения только ссылкой вида "
         "![подпись]({images_prefix}<имя_файла>) ровно с теми именами файлов, что даны в списке "
         "кадров, где кадр иллюстрирует мысль. Файлы изображений уже лежат в {images_prefix}, "
-        "а не в каком-либо другом каталоге. Не выдумывай имена файлов."
+        "а не в каком-либо другом каталоге. В том же входе могут быть слайды презентации — "
+        "они помечены «слайд N»: это страницы презентации лектора в порядке изложения, без "
+        "таймкодов. Опирайся на их содержание там, где тема совпадает с речью, и вставляй их "
+        "ссылкой ![Слайд N]({images_prefix}<имя_файла>). Не выдумывай имена файлов."
     ),
     "en": (
         "You write a high-quality structured Markdown summary of a lecture. Input: the full "
@@ -27,7 +30,10 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "($...$), chronological order. Embed images only as ![caption]({images_prefix}<filename>) "
         "using exactly the filenames given in the keyframe list, where a frame illustrates the "
         "point. Image files already exist under {images_prefix}, not in any other directory. "
-        "Do not invent filenames."
+        "The same input may contain presentation slides labelled 'slide N': these are the "
+        "lecturer's pages in presentation order, with no timestamps. Use their content where "
+        "the topic matches the speech, and embed them as "
+        "![Slide N]({images_prefix}<filename>). Do not invent filenames."
     ),
 }
 
@@ -70,6 +76,16 @@ def _render_keyframes(descriptions: dict, images_prefix: str) -> str:
     return "\n".join(lines)
 
 
+def _render_slides(slides: dict, images_prefix: str) -> str:
+    """Список слайдов для модели: путь, номер страницы, описание."""
+    lines = []
+    # Стабильный порядок по имени файла = порядок страниц (имена slide_NNN.png).
+    for name in sorted(slides):
+        entry = slides[name]
+        lines.append(f"- {images_prefix}{name} [слайд {entry['page']}]: {entry['description']}")
+    return "\n".join(lines)
+
+
 def _answer_text(response: object) -> str:
     """Текст ответа модели; пустая строка, если провайдер вернул пустой content."""
     return (response.choices[0].message.content or "").strip()
@@ -92,14 +108,20 @@ def _empty_answer_details(response: object) -> str:
 
 def run_synthesize(llm_spec: ModelSpec, provider: Provider, transcript: list[dict],
                    descriptions: dict, output_language: str, out_md: Path,
-                   images_prefix: str = "images/") -> Path:
-    """Синтезировать notes.md из транскрипта и описаний кадров; вернуть путь файла.
+                   images_prefix: str = "images/", slides: dict | None = None) -> Path:
+    """Синтезировать notes.md из транскрипта, описаний кадров и слайдов; вернуть путь.
 
     Язык конспекта задаётся явно (output_language: ru/en). Дословные RU/EN-
     фразы из транскрипта модель сохраняет в исходном языке; язык выбирает
     только наш промпт, а не каприз модели. images_prefix — каталог картинок
     относительно итогового Markdown: в обычной раскладке 'images/', в плоском
     режиме '<имя>.images/'.
+
+    slides — описания страниц презентации лектора ({"slide_003.png": {"page",
+    "source", "description"}}); они идут в тот же вход, что и кадры, отдельным
+    разделом «Слайды презентации» с меткой «слайд N», потому что таймкодов у
+    страниц нет и сопоставление с речью делает сама модель. None и пустой
+    словарь означают «слайдов нет».
 
     Пустой (или состоящий из пробелов) ответ модели — ошибка этапа: запрос
     повторяется один раз, а при повторной пустоте поднимается SynthesisError
@@ -117,6 +139,8 @@ def run_synthesize(llm_spec: ModelSpec, provider: Provider, transcript: list[dic
         "Ключевые кадры:\n"
         f"{_render_keyframes(descriptions, images_prefix)}"
     )
+    if slides:
+        user_message += "\n\nСлайды презентации:\n" + _render_slides(slides, images_prefix)
 
     api_key = api_key_from(provider)
     client = OpenAI(base_url=provider.base_url, api_key=api_key)

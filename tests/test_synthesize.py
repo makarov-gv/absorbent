@@ -8,7 +8,8 @@ import pytest
 
 from absorbent.config import ModelSpec, Provider
 from absorbent.synthesize import (SYNTHESIS_ATTEMPTS, SynthesisError, _prompt_language,
-                                  _render_keyframes, _render_transcript, run_synthesize)
+                                  _render_keyframes, _render_slides, _render_transcript,
+                                  run_synthesize)
 
 LLM_SPEC = ModelSpec(name="llm-a", provider="p", default=True)
 
@@ -159,3 +160,86 @@ class TestRunSynthesize:
         assert "--skip-stt --skip-frames --skip-describe" in message
         assert not out.exists()
         assert capsys.readouterr().out.count("повтор запроса") == 1
+
+
+class TestRenderSlides:
+    def test_sorted_by_name_with_page_labels(self) -> None:
+        slides = {
+            "slide_003.png": {"page": 3, "source": "/decks/deck.pdf", "description": "третья"},
+            "slide_010.png": {"page": 10, "source": "/decks/deck.pdf", "description": "десятая"},
+        }
+        rendered = _render_slides(slides, "images/")
+        assert rendered.splitlines() == [
+            "- images/slide_003.png [слайд 3]: третья",
+            "- images/slide_010.png [слайд 10]: десятая",
+        ]
+
+    def test_custom_prefix(self) -> None:
+        """Плоский режим: слайды лежат в <имя>.images/, и модель видит этот путь."""
+        slides = {"slide_001.png": {"page": 1, "source": "/decks/deck.pdf",
+                                    "description": "первая"}}
+        assert _render_slides(slides, "lecture.images/") == (
+            "- lecture.images/slide_001.png [слайд 1]: первая")
+
+
+class TestSlidesInMessage:
+    def _slides(self) -> dict:
+        return {"slide_003.png": {"page": 3, "source": "/decks/deck.pdf",
+                                  "description": "тезисы третьей страницы"}}
+
+    def test_section_added_with_slides(self, tmp_path: Path, fake_openai,
+                                       monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        fake_openai.set_replies(["ок"])
+        run_synthesize(LLM_SPEC, _provider(), [], {}, "ru", tmp_path / "notes.md",
+                       slides=self._slides())
+        content = fake_openai.chat.completions.calls[0]["messages"][1]["content"]
+        assert "Слайды презентации:\n- images/slide_003.png [слайд 3]: тезисы третьей страницы" in content
+        # Кадров нет: раздел кадров пуст, слайды идут отдельным разделом.
+        assert content.index("Ключевые кадры:") < content.index("Слайды презентации:")
+
+    def test_no_section_without_slides(self, tmp_path: Path, fake_openai,
+                                       monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        fake_openai.set_replies(["ок"])
+        run_synthesize(LLM_SPEC, _provider(), [], {}, "ru", tmp_path / "notes.md", slides=None)
+        content = fake_openai.chat.completions.calls[0]["messages"][1]["content"]
+        assert "Слайды презентации" not in content
+
+    def test_empty_slides_dict_means_no_slides(self, tmp_path: Path, fake_openai,
+                                               monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        fake_openai.set_replies(["ок"])
+        run_synthesize(LLM_SPEC, _provider(), [], {}, "ru", tmp_path / "notes.md", slides={})
+        content = fake_openai.chat.completions.calls[0]["messages"][1]["content"]
+        assert "Слайды презентации" not in content
+
+    def test_prefix_reaches_slides(self, tmp_path: Path, fake_openai,
+                                   monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        fake_openai.set_replies(["ок"])
+        run_synthesize(LLM_SPEC, _provider(), [], {}, "ru", tmp_path / "lecture.md",
+                       images_prefix="lecture.images/", slides=self._slides())
+        content = fake_openai.chat.completions.calls[0]["messages"][1]["content"]
+        assert "- lecture.images/slide_003.png [слайд 3]" in content
+
+
+class TestSlidePromptMentions:
+    def test_ru_prompt_explains_slides(self, tmp_path: Path, fake_openai,
+                                       monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        fake_openai.set_replies(["ок"])
+        run_synthesize(LLM_SPEC, _provider(), [], {}, "ru", tmp_path / "notes.md")
+        system = fake_openai.chat.completions.calls[0]["messages"][0]["content"]
+        assert "слайды презентации" in system
+        assert "«слайд N»" in system
+        assert "![Слайд N](images/<имя_файла>)" in system
+
+    def test_en_prompt_explains_slides(self, tmp_path: Path, fake_openai,
+                                       monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        fake_openai.set_replies(["ok"])
+        run_synthesize(LLM_SPEC, _provider(), [], {}, "en", tmp_path / "notes.md")
+        system = fake_openai.chat.completions.calls[0]["messages"][0]["content"]
+        assert "The same input may contain presentation slides labelled 'slide N'" in system
+        assert "![Slide N](images/<filename>)" in system
