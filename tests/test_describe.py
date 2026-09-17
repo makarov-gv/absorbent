@@ -14,6 +14,7 @@ from absorbent.describe import (
     _prompt_language,
     _transcript_window,
     describe_keyframes,
+    describe_slides,
 )
 
 VISION_SPEC = ModelSpec(name="vis", provider="p", default=True)
@@ -224,3 +225,128 @@ class TestDescribeKeyframes:
         describe_keyframes(VISION_SPEC, provider, keyframes, [], images_dir, "ru",
                            tmp_path / "descriptions.json")
         assert fake_openai.api_key is None
+
+
+class TestDescribeSlides:
+    """Описание страниц презентации: без транскрипта и таймкодов, свой промпт."""
+
+    def _setup(self, tmp_path: Path) -> Path:
+        images_dir = tmp_path / "images"
+        _make_image(images_dir, "slide_001.png")
+        _make_image(images_dir, "slide_002.png")
+        return images_dir
+
+    def _slide(self, index: int) -> dict:
+        return {"image": f"slide_{index:03d}.png", "page": index,
+                "source": "/decks/Лекция 4.pdf", "source_page": index}
+
+    def test_describes_and_writes_json(self, tmp_path: Path, fake_openai,
+                                       monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        images_dir = self._setup(tmp_path)
+        fake_openai.set_replies(["первый слайд", "второй слайд"])
+        slides = [self._slide(1), self._slide(2)]
+        out = tmp_path / "slide_descriptions.json"
+        result = describe_slides(VISION_SPEC, _provider(), slides, images_dir, "ru", out)
+        assert result == {
+            "slide_001.png": {"page": 1, "source": "/decks/Лекция 4.pdf",
+                              "description": "первый слайд"},
+            "slide_002.png": {"page": 2, "source": "/decks/Лекция 4.pdf",
+                              "description": "второй слайд"},
+        }
+        saved = json.loads(out.read_text(encoding="utf-8"))
+        assert saved == result
+
+    def test_prompt_has_page_number_and_no_timestamp(self, tmp_path: Path, fake_openai,
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        images_dir = self._setup(tmp_path)
+        fake_openai.set_replies(["описание"])
+        describe_slides(VISION_SPEC, _provider(), [self._slide(2)], images_dir, "ru",
+                        tmp_path / "slide_descriptions.json")
+        call = fake_openai.chat.completions.calls[0]
+        system = call["messages"][0]["content"]
+        user = call["messages"][1]["content"]
+        # Промпт страницы отличается от промпта кадра: ни транскрипта, ни таймкода.
+        assert "содержимое страницы презентации" in system
+        assert "транскрип" not in system.lower()
+        assert user[0]["text"] == "Слайд 2 из 1 (файл Лекция 4.pdf).\nОпиши содержимое слайда."
+        assert "транскрип" not in user[0]["text"].lower()
+        assert user[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+    def test_en_prompt_used(self, tmp_path: Path, fake_openai,
+                            monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        images_dir = self._setup(tmp_path)
+        fake_openai.set_replies(["desc"])
+        describe_slides(VISION_SPEC, _provider(), [self._slide(1)], images_dir, "en",
+                        tmp_path / "slide_descriptions.json")
+        system = fake_openai.chat.completions.calls[0]["messages"][0]["content"]
+        assert "lecture presentation page" in system
+
+    def test_unknown_language_falls_back_ru(self, tmp_path: Path, fake_openai,
+                                            monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        images_dir = self._setup(tmp_path)
+        fake_openai.set_replies(["описание"])
+        describe_slides(VISION_SPEC, _provider(), [self._slide(1)], images_dir, "xx",
+                        tmp_path / "slide_descriptions.json")
+        system = fake_openai.chat.completions.calls[0]["messages"][0]["content"]
+        assert "содержимое страницы презентации" in system
+
+    def test_skips_existing_without_force(self, tmp_path: Path, fake_openai,
+                                          monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        images_dir = self._setup(tmp_path)
+        out = tmp_path / "slide_descriptions.json"
+        out.write_text(json.dumps({"slide_001.png": {"page": 1, "source": "/decks/deck.pdf",
+                                                    "description": "старое"}}),
+                       encoding="utf-8")
+        fake_openai.set_replies(["новое"])
+        result = describe_slides(VISION_SPEC, _provider(), [self._slide(1), self._slide(2)],
+                                 images_dir, "ru", out)
+        assert result["slide_001.png"]["description"] == "старое"  # не переописано.
+        assert result["slide_002.png"]["description"] == "новое"
+        assert len(fake_openai.chat.completions.calls) == 1
+
+    def test_force_redescribes_all(self, tmp_path: Path, fake_openai,
+                                   monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        images_dir = self._setup(tmp_path)
+        out = tmp_path / "slide_descriptions.json"
+        out.write_text(json.dumps({"slide_001.png": {"page": 1, "source": "/decks/deck.pdf",
+                                                    "description": "старое"}}),
+                       encoding="utf-8")
+        fake_openai.set_replies(["новое"])
+        result = describe_slides(VISION_SPEC, _provider(), [self._slide(1)], images_dir, "ru",
+                                 out, force=True)
+        assert result["slide_001.png"]["description"] == "новое"
+
+    def test_api_error_tolerated_per_slide(self, tmp_path: Path, fake_openai,
+                                           monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        images_dir = self._setup(tmp_path)
+        fake_openai.set_replies(["второй слайд"])
+        completions = fake_openai.chat.completions
+        original = completions.create
+        state = {"n": 0}
+
+        def _flaky(**kwargs):
+            state["n"] += 1
+            if state["n"] == 1:
+                raise RuntimeError("network down")
+            return original(**kwargs)
+
+        monkeypatch.setattr(completions, "create", _flaky)
+        result = describe_slides(VISION_SPEC, _provider(), [self._slide(1), self._slide(2)],
+                                 images_dir, "ru", tmp_path / "slide_descriptions.json")
+        assert "(ошибка описания слайда: network down)" in result["slide_001.png"]["description"]
+        assert result["slide_002.png"]["description"] == "второй слайд"
+
+    def test_missing_api_key_raises(self, tmp_path: Path, fake_openai,
+                                    monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("TEST_KEY_A", raising=False)
+        images_dir = self._setup(tmp_path)
+        with pytest.raises(ConfigError, match="TEST_KEY_A"):
+            describe_slides(VISION_SPEC, _provider(), [self._slide(1)], images_dir, "ru",
+                            tmp_path / "slide_descriptions.json")

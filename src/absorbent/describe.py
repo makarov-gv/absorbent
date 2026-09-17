@@ -32,6 +32,24 @@ SYSTEM_PROMPTS: dict[str, str] = {
 }
 
 
+SLIDE_SYSTEM_PROMPTS: dict[str, str] = {
+    "ru": (
+        "Ты извлекаешь содержимое страницы презентации к лекции. На вход: изображение "
+        "одной страницы. Перечисли заголовок слайда, его тезисы, формулы в LaTeX ($...$), "
+        "подписи к схемам и графикам; текст со слайда приводи по возможности дословно, на "
+        "языке оригинала. Отвечай на русском языке (кроме дословного текста слайда). "
+        "Кратко (2–5 предложений или список), без воды. Верни только описание."
+    ),
+    "en": (
+        "You extract the content of a lecture presentation page. Input: an image of one "
+        "page. List the title, the bullet points, formulas in LaTeX ($...$), diagram and "
+        "chart captions; transcribe the slide text as verbatim as possible, in its original "
+        "language. Answer in English (except verbatim slide text). Be concise (2–5 sentences "
+        "or a bullet list), no filler. Return only the description."
+    ),
+}
+
+
 def _prompt_language(output_language: str) -> str:
     """Язык промпта описания: всегда явный (ru/en), без автоопределения."""
     return output_language if output_language in SYSTEM_PROMPTS else "ru"
@@ -57,15 +75,9 @@ def _data_url(image_path: Path) -> str:
     return f"data:{mime};base64,{payload}"
 
 
-def _describe_one(client, model_name: str, system_prompt: str, image_path: Path, seconds: float,
-                  timestamp: str, transcript: list[dict]) -> str:
-    """Один вызов vision-модели для кадра; текст ответа."""
-    window = _transcript_window(transcript, seconds)
-    prompt = (
-        f"Кадр на таймкоде {timestamp}.\n"
-        f"Фрагмент транскрипта вокруг этого момента:\n{window}\n\n"
-        "Опиши содержимое кадра."
-    )
+def _vision_answer(client, model_name: str, system_prompt: str, prompt: str,
+                   image_path: Path) -> str:
+    """Один вызов vision-модели: системный промпт, текст и картинка; ответ модели."""
     response = client.chat.completions.create(
         model=model_name,
         messages=[
@@ -80,6 +92,18 @@ def _describe_one(client, model_name: str, system_prompt: str, image_path: Path,
         ],
     )
     return (response.choices[0].message.content or "").strip()
+
+
+def _describe_one(client, model_name: str, system_prompt: str, image_path: Path, seconds: float,
+                  timestamp: str, transcript: list[dict]) -> str:
+    """Один вызов vision-модели для кадра; текст ответа."""
+    window = _transcript_window(transcript, seconds)
+    prompt = (
+        f"Кадр на таймкоде {timestamp}.\n"
+        f"Фрагмент транскрипта вокруг этого момента:\n{window}\n\n"
+        "Опиши содержимое кадра."
+    )
+    return _vision_answer(client, model_name, system_prompt, prompt, image_path)
 
 
 def describe_keyframes(vision_spec: ModelSpec, provider: Provider, keyframes: list[dict],
@@ -115,5 +139,45 @@ def describe_keyframes(vision_spec: ModelSpec, provider: Provider, keyframes: li
         except Exception as exc:  # ошибка одного кадра не должна ронять весь прогон.
             text = f"(ошибка описания кадра: {exc})"
         descriptions[name] = {"timestamp": kf["timestamp"], "description": text}
+        out_json.write_text(json.dumps(descriptions, ensure_ascii=False, indent=2), encoding="utf-8")
+    return descriptions
+
+
+def describe_slides(vision_spec: ModelSpec, provider: Provider, slides: list[dict],
+                    images_dir: Path, output_language: str, out_json: Path,
+                    force: bool = False) -> dict:
+    """Описать каждую страницу презентации; вернуть и записать slide_descriptions.json.
+
+    Формат: {"slide_003.png": {"page": 3, "source": "/путь/колода.pdf",
+    "description": str}}. Язык описания — output_language (ru/en), промпт
+    выбирается по нему с запасом на 'ru'. Уже описанные страницы (без force)
+    пропускаются, ошибка API на странице не прерывает прогон: в описание
+    пишется текст ошибки. Транскрипт лекции не передаётся: страницы не имеют
+    таймкода, сопоставление делает синтез по содержанию.
+    """
+    from openai import OpenAI
+
+    descriptions: dict = {}
+    if out_json.exists() and not force:
+        descriptions = json.loads(out_json.read_text(encoding="utf-8"))
+
+    system_prompt = SLIDE_SYSTEM_PROMPTS[_prompt_language(output_language)]
+
+    api_key = api_key_from(provider)
+    client = OpenAI(base_url=provider.base_url, api_key=api_key)
+
+    pending = [entry for entry in slides if force or entry["image"] not in descriptions]
+    for entry in pending:
+        name = entry["image"]
+        image_path = images_dir / name
+        prompt = (f"Слайд {entry['page']} из {len(slides)} "
+                  f"(файл {Path(entry['source']).name}).\n"
+                  "Опиши содержимое слайда.")
+        try:
+            text = _vision_answer(client, vision_spec.api_model, system_prompt, prompt, image_path)
+        except Exception as exc:  # ошибка одной страницы не должна ронять весь прогон.
+            text = f"(ошибка описания слайда: {exc})"
+        descriptions[name] = {"page": entry["page"], "source": entry["source"],
+                              "description": text}
         out_json.write_text(json.dumps(descriptions, ensure_ascii=False, indent=2), encoding="utf-8")
     return descriptions
