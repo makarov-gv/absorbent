@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from absorbent.config import ConfigError, load_config
+from absorbent.slides import SlidesError, resolve_slide_sources
 
 # Расширения, обрабатываемые при передаче директории на вход.
 MEDIA_EXTENSIONS: frozenset[str] = frozenset(
@@ -19,8 +20,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="absorbent",
         description="Превращает запись лекции (видео/аудио) в структурированный конспект Markdown.",
+        epilog="Запуск без аргументов открывает интерактивный мастер.",
     )
-    parser.add_argument("input", help="путь к медиафайлу или директории с медиафайлами")
+    parser.add_argument("input", nargs="?",
+                        help="путь к медиафайлу или директории с медиафайлами "
+                             "(без аргументов — интерактивный мастер)")
     parser.add_argument("--config", metavar="PATH", help="путь к YAML-конфигурации")
     parser.add_argument("--stt", metavar="NAME", help="модель распознавания речи (по умолчанию — из конфига)")
     parser.add_argument("--vision-model", metavar="NAME", help="модель описания кадров (по умолчанию — из конфига)")
@@ -54,6 +58,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="минимальная длительность сцены в секундах: более короткие отрезки считаются "
              "анимацией или промежуточным состоянием (по умолчанию 5)",
     )
+    parser.add_argument(
+        "--slides",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="презентация к лекции: PDF, .pptx/.odp/... (конвертируется LibreOffice) или "
+             "каталог с ними; флаг можно повторять",
+    )
+    parser.add_argument(
+        "--slides-dpi",
+        type=int,
+        default=150,
+        metavar="N",
+        help="разрешение растеризации страниц презентации (по умолчанию 150)",
+    )
+    parser.add_argument("--skip-slides", action="store_true",
+                        help="пропустить растеризацию и описание презентаций")
     parser.add_argument(
         "--output-dir",
         metavar="DIR",
@@ -93,6 +114,13 @@ def collect_inputs(raw: str) -> list[Path]:
     return files
 
 
+def _validate_models(cfg: Config, args: argparse.Namespace) -> None:
+    """Ранняя проверка имён моделей: ошибка печатает допустимые имена категории."""
+    cfg.resolve("stt", args.stt)
+    cfg.resolve("vision", args.vision_model)
+    cfg.resolve("llm", args.llm_model)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Точка входа; возвращает код завершения."""
     parser = build_parser()
@@ -100,12 +128,27 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         cfg = load_config(args.config)
-        # Ранняя проверка имён моделей: ошибка печатает допустимые имена категории.
-        cfg.resolve("stt", args.stt)
-        cfg.resolve("vision", args.vision_model)
-        cfg.resolve("llm", args.llm_model)
+        _validate_models(cfg, args)
+        if args.input is None:
+            # Мастер требует терминала: без TTY он завис бы на вводе.
+            if not sys.stdin.isatty():
+                parser.error("нужен путь к медиафайлу; интерактивный мастер доступен "
+                             "только в терминале")
+            # Импорт внутри функции, как и для pipeline.process_file: wizard
+            # берёт из cli MEDIA_EXTENSIONS, иначе получился бы цикл импортов.
+            from absorbent.wizard import run_wizard
+
+            wizard_argv = run_wizard(cfg, args.config)
+            if wizard_argv is None:
+                print("отменено", file=sys.stderr)
+                return 130
+            # Мастер возвращает аргументы командной строки, а не Namespace:
+            # проверки choices и значений остаются в одном месте — в парсере.
+            args = parser.parse_args(wizard_argv)
+            _validate_models(cfg, args)
         inputs = collect_inputs(args.input)
-    except ConfigError as exc:
+        args.slides = resolve_slide_sources(args.slides)
+    except (ConfigError, SlidesError) as exc:
         print(f"ошибка: {exc}", file=sys.stderr)
         return 2
 

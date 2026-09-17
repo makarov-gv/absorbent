@@ -2,12 +2,26 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
 
 from absorbent.cli import MEDIA_EXTENSIONS, build_parser, collect_inputs, main
 from absorbent.config import ConfigError
+
+
+def _write_config(tmp_path: Path) -> Path:
+    """Конфигурация с одной моделью в каждой категории и без ключей API."""
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "providers:\n  p: {base_url: u, api_key_env: ''}\n"
+        "stt:\n  s: {backend: whisper, whisper_model: tiny, default: true}\n"
+        "vision:\n  v: {provider: p, default: true}\n"
+        "llm:\n  l: {provider: p, default: true}\n",
+        encoding="utf-8",
+    )
+    return config
 
 
 class TestCollectInputs:
@@ -55,9 +69,16 @@ class TestParser:
         assert args.force is False
         assert args.skip_stt is False and args.skip_synthesize is False
         assert args.skip_render is False
+        assert args.slides == []
+        assert args.slides_dpi == 150
+        assert args.skip_slides is False
         assert args.stt is None and args.vision_model is None and args.llm_model is None
         assert args.config is None
         assert args.flat is False
+
+    def test_input_is_optional(self) -> None:
+        """Без позиционного аргумента парсер не падает: вход спросит мастер."""
+        assert build_parser().parse_args([]).input is None
 
     def test_explicit_values(self) -> None:
         parser = build_parser()
@@ -68,6 +89,7 @@ class TestParser:
             "--min-scene-seconds", "2",
             "--output-dir", "out", "--force", "--skip-stt", "--skip-frames",
             "--skip-describe", "--skip-synthesize", "--skip-render", "--flat",
+            "--slides", "deck.pdf", "--slides-dpi", "300", "--skip-slides",
         ])
         assert args.language == "ru" and args.output_language == "en"
         assert args.fps == 2.0 and args.hash_threshold == 5
@@ -76,6 +98,13 @@ class TestParser:
         assert args.stt == "x" and args.output_dir == "out" and args.force is True
         assert args.skip_describe is True and args.skip_synthesize is True
         assert args.flat is True
+        assert args.slides == ["deck.pdf"] and args.slides_dpi == 300
+        assert args.skip_slides is True
+
+    def test_slides_flag_accumulates(self) -> None:
+        args = build_parser().parse_args(["in.mp4", "--slides", "a.pdf",
+                                          "--slides", "b.pptx"])
+        assert args.slides == ["a.pdf", "b.pptx"]
 
     def test_bad_language_rejected(self) -> None:
         with pytest.raises(SystemExit):
@@ -92,17 +121,86 @@ class TestParser:
 
 
 class TestMain:
+    def test_no_input_without_terminal_exits_2(self, monkeypatch: pytest.MonkeyPatch,
+                                               capsys: pytest.CaptureFixture) -> None:
+        """Без TTY мастер не запускается: ошибка и код 2 вместо зависания на вводе."""
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+        with pytest.raises(SystemExit) as exc:
+            main([])
+        assert exc.value.code == 2
+        assert "мастер доступен только в терминале" in capsys.readouterr().err
+
+    def test_wizard_arguments_run_pipeline(self, tmp_path: Path,
+                                           monkeypatch: pytest.MonkeyPatch) -> None:
+        """Мастер возвращает argv; main разбирает его и запускает конвейер."""
+        video = tmp_path / "lec.mp4"
+        video.write_bytes(b"x")
+        deck = tmp_path / "deck.pdf"
+        deck.write_bytes(b"%PDF")
+        config = _write_config(tmp_path)
+        seen: dict = {}
+
+        def _fake_process(input_path, cfg, args):
+            seen["input"] = input_path
+            seen["flat"] = args.flat
+            seen["slides"] = args.slides
+            seen["slides_dpi"] = args.slides_dpi
+            return input_path.with_name("lec.md")
+
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr("absorbent.wizard.run_wizard",
+                            lambda cfg, config: [str(video), "--config", str(config), "--flat",
+                                                 "--slides", str(deck), "--slides-dpi", "300"])
+        monkeypatch.setattr("absorbent.pipeline.process_file", _fake_process)
+        assert main([]) == 0
+        assert seen["input"] == video
+        assert seen["flat"] is True
+        assert seen["slides"] == [deck]  # слайды развёрнуты в пути до конвейера.
+        assert seen["slides_dpi"] == 300
+
+    def test_wizard_cancel_exits_130(self, monkeypatch: pytest.MonkeyPatch,
+                                     capsys: pytest.CaptureFixture) -> None:
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr("absorbent.wizard.run_wizard", lambda cfg, config: None)
+        assert main([]) == 130
+        assert "отменено" in capsys.readouterr().err
+
+    def test_slides_are_resolved_before_pipeline(self, tmp_path: Path,
+                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+        """Каталог в --slides разворачивается в файлы презентаций."""
+        video = tmp_path / "lec.mp4"
+        video.write_bytes(b"x")
+        slides_dir = tmp_path / "slides"
+        slides_dir.mkdir()
+        (slides_dir / "b.pdf").write_bytes(b"%PDF")
+        (slides_dir / "a.pdf").write_bytes(b"%PDF")
+        (slides_dir / "notes.txt").write_bytes(b"x")
+        config = _write_config(tmp_path)
+        seen: dict = {}
+
+        def _fake_process(input_path, cfg, args):
+            seen["slides"] = args.slides
+            return input_path.with_name("lec.md")
+
+        monkeypatch.setattr("absorbent.pipeline.process_file", _fake_process)
+        code = main([str(video), "--config", str(config), "--slides", str(slides_dir)])
+        assert code == 0
+        assert [path.name for path in seen["slides"]] == ["a.pdf", "b.pdf"]
+
+    def test_missing_slides_path_exits_2(self, tmp_path: Path,
+                                         capsys: pytest.CaptureFixture) -> None:
+        video = tmp_path / "lec.mp4"
+        video.write_bytes(b"x")
+        config = _write_config(tmp_path)
+        code = main([str(video), "--config", str(config),
+                     "--slides", str(tmp_path / "nope.pdf")])
+        assert code == 2
+        assert "не существует" in capsys.readouterr().err
+
     def test_processes_single_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         video = tmp_path / "lec.mp4"
         video.write_bytes(b"x")
-        config = tmp_path / "config.yaml"
-        config.write_text(
-            "providers:\n  p: {base_url: u, api_key_env: ''}\n"
-            "stt:\n  s: {backend: whisper, whisper_model: tiny, default: true}\n"
-            "vision:\n  v: {provider: p, default: true}\n"
-            "llm:\n  l: {provider: p, default: true}\n",
-            encoding="utf-8",
-        )
+        config = _write_config(tmp_path)
         processed: list[Path] = []
 
         def _fake_process(input_path, cfg, args):
@@ -119,14 +217,7 @@ class TestMain:
         """--flat доезжает до process_file в аргументах."""
         video = tmp_path / "lec.mp4"
         video.write_bytes(b"x")
-        config = tmp_path / "config.yaml"
-        config.write_text(
-            "providers:\n  p: {base_url: u, api_key_env: ''}\n"
-            "stt:\n  s: {backend: whisper, whisper_model: tiny, default: true}\n"
-            "vision:\n  v: {provider: p, default: true}\n"
-            "llm:\n  l: {provider: p, default: true}\n",
-            encoding="utf-8",
-        )
+        config = _write_config(tmp_path)
         seen: dict = {}
 
         def _fake_process(input_path, cfg, args):
