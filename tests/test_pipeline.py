@@ -53,10 +53,32 @@ def fake_stages(monkeypatch: pytest.MonkeyPatch) -> dict:
         out_json.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         return data
 
+    def _prepare_slides(sources, images_dir, work_dir, dpi, force=False):
+        state["calls"].append("slides")
+        state["slides_dpi"] = dpi
+        images_dir.mkdir(parents=True, exist_ok=True)
+        work_dir.mkdir(parents=True, exist_ok=True)
+        entries = []
+        for index, source in enumerate(sources, start=1):
+            name = f"slide_{index:03d}.png"
+            (images_dir / name).write_bytes(b"png")
+            entries.append({"image": name, "page": index, "source": str(source),
+                            "source_page": index})
+        return entries
+
+    def _describe_slides(vision_spec, provider, slides, images_dir, output_language, out_json,
+                         force=False):
+        state["calls"].append(f"slides:{output_language}:{len(slides)}")
+        data = {entry["image"]: {"page": entry["page"], "source": entry["source"],
+                                 "description": f"слайд {entry['image']}"} for entry in slides}
+        out_json.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        return data
+
     def _synthesize(llm_spec, provider, transcript, descriptions, output_language, out_md,
-                    images_prefix="images/"):
+                    images_prefix="images/", slides=None):
         state["calls"].append(f"synthesize:{output_language}:{len(descriptions)}")
         state["images_prefix"] = images_prefix
+        state["slides"] = slides
         out_md.parent.mkdir(parents=True, exist_ok=True)
         out_md.write_text("# Конспект\n", encoding="utf-8")
         return out_md
@@ -81,6 +103,8 @@ def fake_stages(monkeypatch: pytest.MonkeyPatch) -> dict:
     monkeypatch.setattr(pipeline_module, "select_keyframes", _select)
     monkeypatch.setattr(pipeline_module, "run_stt", _run_stt)
     monkeypatch.setattr(pipeline_module, "describe_keyframes", _describe)
+    monkeypatch.setattr(pipeline_module, "prepare_slides", _prepare_slides)
+    monkeypatch.setattr(pipeline_module, "describe_slides", _describe_slides)
     monkeypatch.setattr(pipeline_module, "run_synthesize", _synthesize)
     monkeypatch.setattr(pipeline_module, "render_all", _render)
     state["module"] = pipeline_module
@@ -262,7 +286,7 @@ class TestHelpers:
         seen: dict = {}
 
         def _synthesize(llm_spec, provider, transcript, descriptions, output_language, out_md,
-                        images_prefix="images/"):
+                        images_prefix="images/", slides=None):
             seen["descriptions"] = descriptions
             out_md.parent.mkdir(parents=True, exist_ok=True)
             out_md.write_text("x", encoding="utf-8")
@@ -292,7 +316,7 @@ class TestHelpers:
         seen: dict = {}
 
         def _synthesize(llm_spec, provider, transcript, descriptions, output_language, out_md,
-                        images_prefix="images/"):
+                        images_prefix="images/", slides=None):
             seen["descriptions"] = descriptions
             out_md.parent.mkdir(parents=True, exist_ok=True)
             out_md.write_text("x", encoding="utf-8")
@@ -387,3 +411,75 @@ class TestFlatMode:
         assert not (out_dir / ".absorbent" / "frames").exists()
         # Служебный кэш при этом на месте: транскрипт и язык пишутся туда.
         assert (out_dir / ".absorbent" / "language.txt").exists()
+
+
+class TestSlides:
+    """Этап презентаций: порядок, skip-флаги, отсев чужого кэша, аудиовход."""
+
+    def _deck(self, tmp_path: Path, name: str = "deck.pdf") -> Path:
+        path = tmp_path / name
+        path.write_bytes(b"%PDF")
+        return path
+
+    def test_stage_order_and_synthesis_input(self, tmp_path: Path, cfg, fake_stages: dict,
+                                             args_namespace) -> None:
+        deck = self._deck(tmp_path)
+        args_namespace.slides = [deck]
+        process_file(_input(tmp_path), cfg, args_namespace)
+        # Растеризация идёт между отбором кадров и распознаванием речи.
+        assert fake_stages["calls"] == [
+            "extract", "select:10:5.0", "slides", "stt:auto", "describe:ru:1", "slides:ru:1",
+            "synthesize:ru:1", "render",
+        ]
+        # Описания страниц уходят в синтез вместе с описаниями кадров.
+        assert set(fake_stages["slides"]) == {"slide_001.png"}
+        assert (tmp_path / "Лекция" / "images" / "slide_001.png").exists()
+        assert (tmp_path / "Лекция" / ".absorbent" / "slide_descriptions.json").exists()
+
+    def test_skip_slides_flag_keeps_slides_out(self, tmp_path: Path, cfg, fake_stages: dict,
+                                               args_namespace, capsys: pytest.CaptureFixture) -> None:
+        args_namespace.slides = [self._deck(tmp_path)]
+        args_namespace.skip_slides = True
+        process_file(_input(tmp_path), cfg, args_namespace)
+        assert "slides" not in fake_stages["calls"]
+        assert fake_stages["slides"] == {}
+        assert "презентации пропущены (--skip-slides)" in capsys.readouterr().out
+
+    def test_audio_with_slides_has_no_frame_dirs(self, tmp_path: Path, cfg, fake_stages: dict,
+                                                 args_namespace) -> None:
+        """Аудиовход со слайдами: картинки слайдов есть, каталогов кадров нет."""
+        fake_stages["video"] = False
+        deck = self._deck(tmp_path)
+        args_namespace.slides = [deck]
+        process_file(_input(tmp_path, "lecture.mp3"), cfg, args_namespace)
+        out_dir = tmp_path / "lecture"
+        assert fake_stages["calls"] == ["slides", "stt:auto", "slides:ru:1", "synthesize:ru:0",
+                                        "render"]
+        assert (out_dir / "images" / "slide_001.png").exists()
+        assert not (out_dir / ".absorbent" / "frames").exists()
+
+    def test_slides_dpi_reaches_stage(self, tmp_path: Path, cfg, fake_stages: dict,
+                                      args_namespace) -> None:
+        args_namespace.slides = [self._deck(tmp_path)]
+        args_namespace.slides_dpi = 300
+        process_file(_input(tmp_path), cfg, args_namespace)
+        assert fake_stages["slides_dpi"] == 300
+
+    def test_descriptions_from_cache_filtered_by_current_pages(self, tmp_path: Path, cfg,
+                                                              fake_stages: dict,
+                                                              args_namespace) -> None:
+        """--skip-describe: из кэша берутся описания только текущих страниц."""
+        deck = self._deck(tmp_path)
+        args_namespace.slides = [deck]
+        args_namespace.skip_describe = True
+        cache = tmp_path / "Лекция" / ".absorbent"
+        cache.mkdir(parents=True)
+        (cache / "slide_descriptions.json").write_text(
+            json.dumps({
+                "slide_001.png": {"page": 1, "source": str(deck), "description": "текущая"},
+                "slide_009.png": {"page": 9, "source": str(deck), "description": "прошлый отбор"},
+            }, ensure_ascii=False),
+            encoding="utf-8")
+        process_file(_input(tmp_path), cfg, args_namespace)
+        assert fake_stages["slides"] == {
+            "slide_001.png": {"page": 1, "source": str(deck), "description": "текущая"}}

@@ -93,19 +93,29 @@ def offline_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args_names
         out_json.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         return data
 
+    def _fake_describe_slides(vision_spec, provider, slides, images_dir, output_language,
+                              out_json, force=False):
+        data = {entry["image"]: {"page": entry["page"], "source": entry["source"],
+                                 "description": f"страница {entry['page']}"} for entry in slides}
+        out_json.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        return data
+
     def _fake_synthesize(llm_spec, provider, transcript, descriptions, output_language, out_md,
-                         images_prefix="images/"):
-        # Реалистичный Markdown: подпись + ссылка на каждый кадр (по контракту
-        # имена берутся только из списка описаний).
+                         images_prefix="images/", slides=None):
+        # Реалистичный Markdown: подпись + ссылка на каждый кадр и слайд (по
+        # контракту имена берутся только из списков описаний).
         parts = ["# Конспект интеграционного теста\n"]
         for name in sorted(descriptions):
             parts.append(f"![Кадр {descriptions[name]['timestamp']}]({images_prefix}{name})\n")
+        for name in sorted(slides or {}):
+            parts.append(f"![Слайд {slides[name]['page']}]({images_prefix}{name})\n")
         out_md.parent.mkdir(parents=True, exist_ok=True)
         out_md.write_text("\n".join(parts), encoding="utf-8")
         return out_md
 
     monkeypatch.setattr(pipeline_module, "run_stt", _fake_stt)
     monkeypatch.setattr(pipeline_module, "describe_keyframes", _fake_describe)
+    monkeypatch.setattr(pipeline_module, "describe_slides", _fake_describe_slides)
     monkeypatch.setattr(pipeline_module, "run_synthesize", _fake_synthesize)
     def _skip_render(notes_md, out_html=None, out_pdf=None, lang=None):
         return notes_md.with_name("notes.html"), notes_md.with_name("notes.pdf")
@@ -187,3 +197,34 @@ class TestAudioFlatMode:
         assert (cache / "language.txt").read_text(encoding="utf-8") == "ru"
         assert not (cache / "transcript.json").exists()
         assert not (tmp_path / "lecture").exists()
+
+
+class TestPresentationSlides:
+    """Презентация лектора: настоящий pdftoppm, подменённые vision/LLM."""
+
+    @pytest.mark.skipif(shutil.which("pdftoppm") is None, reason="pdftoppm не установлен")
+    def test_slides_end_to_end(self, offline_pipeline, tmp_path: Path) -> None:
+        video, out_dir, cfg, args = offline_pipeline
+        args.output_dir = str(out_dir)
+        deck = tmp_path / "deck.pdf"
+        pages = [Image.new("RGB", (640, 360), (255, 255, 255)) for _ in range(2)]
+        pages[0].save(deck, "PDF", save_all=True, append_images=pages[1:], resolution=150)
+        args.slides = [deck]
+
+        notes_path = process_file(video, cfg, args)
+
+        # 1. Страницы презентации рядом с кадрами видео.
+        assert sorted(p.name for p in (out_dir / "images").glob("slide_*.png")) == [
+            "slide_001.png", "slide_002.png"]
+        assert sorted(p.name for p in (out_dir / "images").glob("frame_*.jpg")) == [
+            "frame_00_00_00.jpg", "frame_00_00_05.jpg", "frame_00_00_10.jpg"]
+        # 2. Описания страниц записаны и скопированы в кэш страниц.
+        descriptions = json.loads(
+            (out_dir / ".absorbent" / "slide_descriptions.json").read_text(encoding="utf-8"))
+        assert set(descriptions) == {"slide_001.png", "slide_002.png"}
+        assert (out_dir / ".absorbent" / "slides" / "01_deck" / "signature.json").exists()
+
+        # 3. Слайды попали во вход синтеза и в notes.md ссылками с реальными именами.
+        text = notes_path.read_text(encoding="utf-8")
+        assert "![Слайд 1](images/slide_001.png)" in text
+        assert "![Слайд 2](images/slide_002.png)" in text

@@ -8,9 +8,10 @@ from pathlib import Path
 
 from absorbent.config import Config
 from absorbent.dedup import select_keyframes
-from absorbent.describe import describe_keyframes
+from absorbent.describe import describe_keyframes, describe_slides
 from absorbent.extract import extract_frames, has_video_stream
 from absorbent.render import outputs_up_to_date, render_all
+from absorbent.slides import prepare_slides
 from absorbent.synthesize import run_synthesize
 from absorbent.transcribe import run_stt
 
@@ -26,6 +27,17 @@ def _load_json(path: Path) -> list | dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _cached_dict(path: Path) -> dict:
+    """Словарь описаний из кэша: отсутствие файла или список дают {}."""
+    loaded = _load_json(path)
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _filter_by_images(items: dict, images: set[str]) -> dict:
+    """Оставить описания текущего набора картинок: чужой отбор в синтез не идёт."""
+    return {name: entry for name, entry in items.items() if name in images}
+
+
 def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Path:
     """Прогнать все этапы конвейера для одного файла; вернуть путь конспекта.
 
@@ -35,17 +47,29 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
     <каталог входа>/.absorbent/<имя>/.
 
     Порядок этапов: извлечение кадров -> отбор ключевых кадров ->
-    распознавание речи -> описание кадров -> синтез Markdown ->
-    постпроцессинг (таблицы, HTML, PDF). Вход без видеопотока (аудиофайл)
-    пропускает все этапы кадров: остаётся транскрипт и конспект без
-    иллюстраций, а каталогов кадров (frames/ и images/) не появляется вовсе.
+    растеризация презентаций -> распознавание речи -> описание кадров и
+    страниц презентации -> синтез Markdown -> постпроцессинг (таблицы, HTML,
+    PDF). Вход без видеопотока (аудиофайл) пропускает все этапы кадров:
+    остаётся транскрипт и конспект без иллюстраций, а каталогов кадров
+    (frames/ и images/) не появляется вовсе — так же ведёт себя прогон без
+    `--slides`.
+
+    Презентации к лекции задаются `--slides` (файл или каталог, флаг можно
+    повторять): каждая страница растрируется в `--slides-dpi` и описывается
+    той же vision-моделью, что кадры, а описания уходят в синтез отдельным
+    разделом «Слайды презентации» с меткой «слайд N». Автоподбор презентации
+    по имени записи не делается: рядом с записью лежит PDF, собранный самим
+    absorbent из предыдущего конспекта. Этап отключается `--skip-slides`.
 
     Признак готового этапа — его артефакт: transcript.json, keyframes.json,
-    descriptions.json, notes.md; постпроцессинг пропускается, когда HTML и
-    PDF не старше notes.md. Каждый этап уважает свой `--skip-*` флаг,
-    постпроцессинг отключается `--skip-render`, а полный перезапуск даёт
-    `--force` — он же нужен, если сменился `--output-language`: готовый
-    notes.md переиспользуется как есть.
+    descriptions.json, slide_descriptions.json, notes.md; страницы презентаций
+    принимаются по подписи источника в каталоге `slides/` (путь, размер, mtime
+    и dpi), поэтому правка колоды или смена `--slides-dpi` заставляют
+    растеризовать её заново. Постпроцессинг пропускается, когда HTML и PDF не
+    старше notes.md. Каждый этап уважает свой `--skip-*` флаг, постпроцессинг
+    отключается `--skip-render`, а полный перезапуск даёт `--force` — он же
+    нужен, если сменился `--output-language`: готовый notes.md
+    переиспользуется как есть.
 
     Язык распознавания речи (`--language`) и язык результата
     (`--output-language`) — независимые оси: первый лишь подсказывает whisper
@@ -77,9 +101,12 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
     frames_dir = cache / "frames"
     keyframes_path = cache / "keyframes.json"
     descriptions_path = cache / "descriptions.json"
-    # Конвейер заводит только каталоги результата и кэша: каталоги кадров
-    # (frames/ и images/) создают сами этапы кадров и только тогда, когда
-    # кадры есть, поэтому аудиовход не оставляет пустых каталогов картинок.
+    slides_dir = cache / "slides"
+    slide_descriptions_path = cache / "slide_descriptions.json"
+    # Конвейер заводит только каталоги результата и кэша: каталоги картинок
+    # (frames/ и images/) создают сами этапы кадров и презентаций, и только
+    # тогда, когда картинки есть, поэтому аудиовход без слайдов не оставляет
+    # пустых каталогов.
     for directory in (output_dir, cache):
         directory.mkdir(parents=True, exist_ok=True)
 
@@ -100,6 +127,15 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
     elif not args.skip_frames:
         print(f"[{stem}] кадров нет (аудио без видеопотока)")
 
+    slides: list[dict] = []
+    slide_sources = getattr(args, "slides", [])
+    if slide_sources and not getattr(args, "skip_slides", False):
+        print(f"[{stem}] растеризация презентаций: {len(slide_sources)}...")
+        slides = prepare_slides(slide_sources, images_dir, slides_dir,
+                                getattr(args, "slides_dpi", 150), force=args.force)
+    elif slide_sources:
+        print(f"[{stem}] презентации пропущены (--skip-slides)")
+
     print(f"[{stem}] распознавание речи...")
     if not args.skip_stt:
         stt_provider, stt_spec = cfg.resolve("stt", args.stt)
@@ -108,25 +144,34 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
     transcript = _load_json(transcript_path)
 
     descriptions: dict = {}
-    if not args.skip_describe:
-        print(f"[{stem}] описание {len(keyframes)} ключевых кадров...")
+    slide_descriptions: dict = {}
+    if not args.skip_describe and (keyframes or slides):
+        vision_provider, vision_spec = cfg.resolve("vision", args.vision_model)
         if keyframes:
-            vision_provider, vision_spec = cfg.resolve("vision", args.vision_model)
+            print(f"[{stem}] описание {len(keyframes)} ключевых кадров...")
             descriptions = describe_keyframes(vision_spec, vision_provider, keyframes, transcript,
                                               images_dir, output_language, descriptions_path,
                                               force=args.force)
         else:
-            descriptions = _load_json(descriptions_path)
-            if isinstance(descriptions, list):
-                descriptions = {}
-    elif descriptions_path.exists():
-        loaded = _load_json(descriptions_path)
-        descriptions = loaded if isinstance(loaded, dict) else {}
+            descriptions = _cached_dict(descriptions_path)
+        if slides:
+            print(f"[{stem}] описание {len(slides)} слайдов...")
+            slide_descriptions = describe_slides(vision_spec, vision_provider, slides, images_dir,
+                                                 output_language, slide_descriptions_path,
+                                                 force=args.force)
+        else:
+            slide_descriptions = _cached_dict(slide_descriptions_path)
+    else:
+        descriptions = _cached_dict(descriptions_path)
+        slide_descriptions = _cached_dict(slide_descriptions_path)
 
-    # Описания кадров прошлого отбора в синтез не идут: иначе модель вставит ссылки на чужие кадры.
+    # Описания кадров и страниц прошлого отбора в синтез не идут: иначе модель
+    # вставит ссылки на чужие файлы, которых на диске нет.
     if keyframes:
-        wanted = {kf["image"] for kf in keyframes}
-        descriptions = {name: entry for name, entry in descriptions.items() if name in wanted}
+        descriptions = _filter_by_images(descriptions, {kf["image"] for kf in keyframes})
+    if slides:
+        slide_descriptions = _filter_by_images(slide_descriptions,
+                                               {entry["image"] for entry in slides})
 
     if not args.skip_synthesize:
         if notes_path.exists() and not args.force:
@@ -135,7 +180,7 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
             print(f"[{stem}] синтез Markdown...")
             llm_provider, llm_spec = cfg.resolve("llm", args.llm_model)
             run_synthesize(llm_spec, llm_provider, transcript, descriptions, output_language,
-                           notes_path, images_prefix=images_prefix)
+                           notes_path, images_prefix=images_prefix, slides=slide_descriptions)
 
     if not getattr(args, "skip_render", False) and notes_path.exists():
         if args.force or not outputs_up_to_date(notes_path, html_path, pdf_path):
