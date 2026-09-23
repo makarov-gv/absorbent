@@ -63,7 +63,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="PATH",
-        help="презентация к лекции: PDF, .pptx/.odp/... (конвертируется LibreOffice) или "
+        help="материал к лекции: презентация — PDF, .pptx/.odp/... (конвертируется "
+             "LibreOffice), или фотография доски (.png/.jpg/.jpeg/.webp); можно указать "
              "каталог с ними; флаг можно повторять",
     )
     parser.add_argument(
@@ -71,10 +72,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=150,
         metavar="N",
-        help="разрешение растеризации страниц презентации (по умолчанию 150)",
+        help="разрешение растеризации страниц презентации (по умолчанию 150; "
+             "на фотографии не влияет)",
     )
     parser.add_argument("--skip-slides", action="store_true",
-                        help="пропустить растеризацию и описание презентаций")
+                        help="пропустить подготовку и описание презентаций и фотографий")
     parser.add_argument(
         "--output-dir",
         metavar="DIR",

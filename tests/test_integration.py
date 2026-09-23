@@ -96,19 +96,23 @@ def offline_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args_names
     def _fake_describe_slides(vision_spec, provider, slides, images_dir, output_language,
                               out_json, force=False):
         data = {entry["image"]: {"page": entry["page"], "source": entry["source"],
+                                 "kind": entry["kind"],
                                  "description": f"страница {entry['page']}"} for entry in slides}
         out_json.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         return data
 
     def _fake_synthesize(llm_spec, provider, transcript, descriptions, output_language, out_md,
                          images_prefix="images/", slides=None):
-        # Реалистичный Markdown: подпись + ссылка на каждый кадр и слайд (по
+        # Реалистичный Markdown: подпись + ссылка на каждый кадр и материал (по
         # контракту имена берутся только из списков описаний).
         parts = ["# Конспект интеграционного теста\n"]
         for name in sorted(descriptions):
             parts.append(f"![Кадр {descriptions[name]['timestamp']}]({images_prefix}{name})\n")
         for name in sorted(slides or {}):
-            parts.append(f"![Слайд {slides[name]['page']}]({images_prefix}{name})\n")
+            entry = slides[name]
+            label = ("Фотография доски" if entry.get("kind") == "photo"
+                     else f"Слайд {entry['page']}")
+            parts.append(f"![{label}]({images_prefix}{name})\n")
         out_md.parent.mkdir(parents=True, exist_ok=True)
         out_md.write_text("\n".join(parts), encoding="utf-8")
         return out_md
@@ -228,3 +232,31 @@ class TestPresentationSlides:
         text = notes_path.read_text(encoding="utf-8")
         assert "![Слайд 1](images/slide_001.png)" in text
         assert "![Слайд 2](images/slide_002.png)" in text
+
+    def test_board_photo_alongside_deck(self, offline_pipeline, tmp_path: Path) -> None:
+        """Фотография доски проходит тот же путь, что страницы колоды.
+
+        Нумерация снимка своя: его файл не сдвигает номера слайдов и не
+        подписывается как слайд.
+        """
+        video, out_dir, cfg, args = offline_pipeline
+        args.output_dir = str(out_dir)
+        deck = tmp_path / "deck.pdf"
+        pages = [Image.new("RGB", (640, 360), (255, 255, 255)) for _ in range(2)]
+        pages[0].save(deck, "PDF", save_all=True, append_images=pages[1:], resolution=150)
+        photo = tmp_path / "доска.jpg"
+        Image.new("RGB", (480, 320), (40, 40, 40)).save(photo, "JPEG")
+        args.slides = [deck, photo]
+
+        notes_path = process_file(video, cfg, args)
+
+        assert sorted(p.name for p in (out_dir / "images").glob("slide_*.png")) == [
+            "slide_001.png", "slide_002.png"]
+        assert [p.name for p in (out_dir / "images").glob("photo_*")] == ["photo_001.jpg"]
+        descriptions = json.loads(
+            (out_dir / ".absorbent" / "slide_descriptions.json").read_text(encoding="utf-8"))
+        assert descriptions["photo_001.jpg"]["kind"] == "photo"
+        assert descriptions["slide_001.png"]["kind"] == "slide"
+        text = notes_path.read_text(encoding="utf-8")
+        assert "![Фотография доски](images/photo_001.jpg)" in text
+        assert "![Слайд 1](images/slide_001.png)" in text

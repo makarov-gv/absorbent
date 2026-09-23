@@ -172,6 +172,16 @@ class TestChooseSlides:
         console = ScriptedConsole(many=[[str(deck)]])
         assert _choose_slides(console, input_path, tmp_path) == [deck]
 
+    def test_board_photo_listed_as_candidate(self, tmp_path: Path) -> None:
+        """Снимок доски предлагается в списке материалов наравне с колодой."""
+        input_path = _media(tmp_path)
+        photo = tmp_path / "доска.jpg"
+        photo.write_bytes(b"\xff\xd8\xff\xe0")
+        console = ScriptedConsole(many=[[str(photo)]])
+        assert _choose_slides(console, input_path, tmp_path) == [photo]
+        values = console.questions_of("select_many")[0][3]
+        assert (str(photo), str(photo)) in values
+
     def test_same_stem_candidate_preselected(self, tmp_path: Path) -> None:
         input_path = _media(tmp_path, "Lecture.m4a")
         deck = _slides(tmp_path, "Lecture.pdf")
@@ -206,7 +216,7 @@ class TestChooseSlides:
         missing = tmp_path / "nowhere.pdf"
         console = ScriptedConsole(many=[[MANUAL_PATH], [str(deck)]], texts=[str(missing)])
         assert _choose_slides(console, input_path, tmp_path) == [deck]
-        assert console.messages[0][0] == "Слайды не найдены"
+        assert console.messages[0][0] == "Материалы не найдены"
         assert "не существует" in console.messages[0][1]
 
     def test_repeated_path_not_duplicated(self, tmp_path: Path) -> None:

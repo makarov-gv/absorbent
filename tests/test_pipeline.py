@@ -443,7 +443,7 @@ class TestSlides:
         process_file(_input(tmp_path), cfg, args_namespace)
         assert "slides" not in fake_stages["calls"]
         assert fake_stages["slides"] == {}
-        assert "презентации пропущены (--skip-slides)" in capsys.readouterr().out
+        assert "материалы к лекции пропущены (--skip-slides)" in capsys.readouterr().out
 
     def test_audio_with_slides_has_no_frame_dirs(self, tmp_path: Path, cfg, fake_stages: dict,
                                                  args_namespace) -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from absorbent.config import ModelSpec, Provider, api_key_from
+from absorbent.slides import KIND_PHOTO, KIND_SLIDE
 
 SYSTEM_PROMPTS: dict[str, str] = {
     "ru": (
@@ -77,12 +78,25 @@ def _render_keyframes(descriptions: dict, images_prefix: str) -> str:
 
 
 def _render_slides(slides: dict, images_prefix: str) -> str:
-    """Список слайдов для модели: путь, номер страницы, описание."""
+    """Список страниц презентации для модели: путь, номер страницы, описание."""
     lines = []
     # Стабильный порядок по имени файла = порядок страниц (имена slide_NNN.png).
     for name in sorted(slides):
         entry = slides[name]
+        if entry.get("kind", KIND_SLIDE) == KIND_PHOTO:
+            continue
         lines.append(f"- {images_prefix}{name} [слайд {entry['page']}]: {entry['description']}")
+    return "\n".join(lines)
+
+
+def _render_photos(slides: dict, images_prefix: str) -> str:
+    """Список фотографий доски для модели: путь и описание (номер страницы не нужен)."""
+    lines = []
+    for name in sorted(slides):
+        entry = slides[name]
+        if entry.get("kind", KIND_SLIDE) != KIND_PHOTO:
+            continue
+        lines.append(f"- {images_prefix}{name} [фотография доски]: {entry['description']}")
     return "\n".join(lines)
 
 
@@ -117,11 +131,13 @@ def run_synthesize(llm_spec: ModelSpec, provider: Provider, transcript: list[dic
     относительно итогового Markdown: в обычной раскладке 'images/', в плоском
     режиме '<имя>.images/'.
 
-    slides — описания страниц презентации лектора ({"slide_003.png": {"page",
-    "source", "description"}}); они идут в тот же вход, что и кадры, отдельным
-    разделом «Слайды презентации» с меткой «слайд N», потому что таймкодов у
-    страниц нет и сопоставление с речью делает сама модель. None и пустой
-    словарь означают «слайдов нет».
+    slides — описания дополнительных материалов к лекции ({"slide_003.png":
+    {"page", "source", "kind", "description"}}): страницы презентации (kind
+    "slide", метка «слайд N») и фотографии доски (kind "photo"). Они идут в тот
+    же вход, что и кадры, отдельными разделами, потому что таймкодов у
+    страниц и снимков нет и сопоставление с речью делает сама модель. None и
+    пустой словарь означают «дополнительных материалов нет»; отсутствие поля
+    kind читается как страница презентации.
 
     Пустой (или состоящий из пробелов) ответ модели — ошибка этапа: запрос
     повторяется один раз, а при повторной пустоте поднимается SynthesisError
@@ -134,13 +150,19 @@ def run_synthesize(llm_spec: ModelSpec, provider: Provider, transcript: list[dic
         images_prefix=images_prefix)
 
     user_message = (
-        "Транскрипт лекции:\n"
+        "Транскрипт лекции (основной источник; конспект строится по нему):\n"
         f"{_render_transcript(transcript)}\n\n"
-        "Ключевые кадры:\n"
+        "Ключевые кадры записи:\n"
         f"{_render_keyframes(descriptions, images_prefix)}"
     )
-    if slides:
-        user_message += "\n\nСлайды презентации:\n" + _render_slides(slides, images_prefix)
+    materials = slides or {}
+    pages = _render_slides(materials, images_prefix)
+    if pages:
+        user_message += ("\n\nСлайды презентации (справочно: часть колоды могла остаться "
+                         "за рамками лекции):\n" + pages)
+    photos = _render_photos(materials, images_prefix)
+    if photos:
+        user_message += "\n\nФотографии доски (снимки, сделанные на лекции):\n" + photos
 
     api_key = api_key_from(provider)
     client = OpenAI(base_url=provider.base_url, api_key=api_key)

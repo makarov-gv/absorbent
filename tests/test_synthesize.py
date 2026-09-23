@@ -12,6 +12,7 @@ from absorbent.synthesize import (
     SynthesisError,
     _prompt_language,
     _render_keyframes,
+    _render_photos,
     _render_slides,
     _render_transcript,
     run_synthesize,
@@ -187,6 +188,38 @@ class TestRenderSlides:
         assert _render_slides(slides, "lecture.images/") == (
             "- lecture.images/slide_001.png [слайд 1]: первая")
 
+    def test_photos_go_to_their_own_list(self) -> None:
+        """Снимок доски не смешивается со страницами колоды и не получает номер слайда."""
+        materials = {
+            "slide_001.png": {"page": 1, "source": "/d.pdf", "kind": "slide",
+                              "description": "первая"},
+            "photo_001.jpg": {"page": 1, "source": "/доска.jpg", "kind": "photo",
+                              "description": "формула на доске"},
+        }
+        assert _render_slides(materials, "images/") == "- images/slide_001.png [слайд 1]: первая"
+        assert _render_photos(materials, "images/") == (
+            "- images/photo_001.jpg [фотография доски]: формула на доске")
+
+
+class TestRenderPhotos:
+    def test_sorted_by_name_without_page_numbers(self) -> None:
+        materials = {
+            "photo_002.jpg": {"page": 2, "source": "/доска.jpg", "kind": "photo",
+                              "description": "вторая"},
+            "photo_001.JPG": {"page": 1, "source": "/доска.jpg", "kind": "photo",
+                              "description": "первая"},
+        }
+        rendered = _render_photos(materials, "lecture.images/")
+        assert rendered.splitlines() == [
+            "- lecture.images/photo_001.JPG [фотография доски]: первая",
+            "- lecture.images/photo_002.jpg [фотография доски]: вторая",
+        ]
+
+    def test_pages_without_kind_are_not_photos(self) -> None:
+        """Описания, снятые до появления снимков, поля kind не имеют."""
+        pages = {"slide_001.png": {"page": 1, "source": "/d.pdf", "description": "страница"}}
+        assert _render_photos(pages, "images/") == ""
+
 
 class TestSlidesInMessage:
     def _slides(self) -> dict:
@@ -200,9 +233,11 @@ class TestSlidesInMessage:
         run_synthesize(LLM_SPEC, _provider(), [], {}, "ru", tmp_path / "notes.md",
                        slides=self._slides())
         content = fake_openai.chat.completions.calls[0]["messages"][1]["content"]
-        assert "Слайды презентации:\n- images/slide_003.png [слайд 3]: тезисы третьей страницы" in content
-        # Кадров нет: раздел кадров пуст, слайды идут отдельным разделом.
-        assert content.index("Ключевые кадры:") < content.index("Слайды презентации:")
+        assert ("Слайды презентации (справочно: часть колоды могла остаться за рамками "
+                "лекции):\n- images/slide_003.png [слайд 3]: тезисы третьей страницы") in content
+        # Транскрипт идёт первым: он объявлен основным источником конспекта.
+        assert content.index("Транскрипт лекции (основной источник") < content.index(
+            "Слайды презентации")
 
     def test_no_section_without_slides(self, tmp_path: Path, fake_openai,
                                        monkeypatch: pytest.MonkeyPatch) -> None:
@@ -230,22 +265,39 @@ class TestSlidesInMessage:
         assert "- lecture.images/slide_003.png [слайд 3]" in content
 
 
-class TestSlidePromptMentions:
-    def test_ru_prompt_explains_slides(self, tmp_path: Path, fake_openai,
-                                       monkeypatch: pytest.MonkeyPatch) -> None:
+class TestPhotosInMessage:
+    """Снимок доски уходит в синтез отдельным разделом и встраивается как иллюстрация."""
+
+    def _materials(self) -> dict:
+        return {
+            "slide_003.png": {"page": 3, "source": "/decks/deck.pdf", "kind": "slide",
+                              "description": "третья страница"},
+            "photo_001.jpg": {"page": 1, "source": "/снимки/доска.jpg", "kind": "photo",
+                              "description": "формула на доске"},
+        }
+
+    def test_photo_section_separate_from_slides(self, tmp_path: Path, fake_openai,
+                                                monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("TEST_KEY_A", "k")
         fake_openai.set_replies(["ок"])
-        run_synthesize(LLM_SPEC, _provider(), [], {}, "ru", tmp_path / "notes.md")
-        system = fake_openai.chat.completions.calls[0]["messages"][0]["content"]
-        assert "слайды презентации" in system
-        assert "«слайд N»" in system
-        assert "![Слайд N](images/<имя_файла>)" in system
+        run_synthesize(LLM_SPEC, _provider(), [], {}, "ru", tmp_path / "notes.md",
+                       slides=self._materials())
+        content = fake_openai.chat.completions.calls[0]["messages"][1]["content"]
+        slides_part, photos_part = content.split("Фотографии доски")[0], content.split(
+            "Фотографии доски (снимки, сделанные на лекции):")[1]
+        assert "photo_001.jpg" not in slides_part
+        assert "slide_003.png" not in photos_part
+        assert photos_part.strip() == (
+            "- images/photo_001.jpg [фотография доски]: формула на доске")
 
-    def test_en_prompt_explains_slides(self, tmp_path: Path, fake_openai,
-                                       monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_photo_only_materials_add_no_slide_section(self, tmp_path: Path, fake_openai,
+                                                       monkeypatch: pytest.MonkeyPatch) -> None:
+        """Только снимок доски: раздела презентации во входе нет."""
         monkeypatch.setenv("TEST_KEY_A", "k")
-        fake_openai.set_replies(["ok"])
-        run_synthesize(LLM_SPEC, _provider(), [], {}, "en", tmp_path / "notes.md")
-        system = fake_openai.chat.completions.calls[0]["messages"][0]["content"]
-        assert "The same input may contain presentation slides labelled 'slide N'" in system
-        assert "![Slide N](images/<filename>)" in system
+        fake_openai.set_replies(["ок"])
+        materials = {"photo_001.jpg": self._materials()["photo_001.jpg"]}
+        run_synthesize(LLM_SPEC, _provider(), [], {}, "ru", tmp_path / "notes.md",
+                       slides=materials)
+        content = fake_openai.chat.completions.calls[0]["messages"][1]["content"]
+        assert "Слайды презентации" not in content
+        assert "Фотографии доски (снимки, сделанные на лекции):" in content

@@ -1,7 +1,9 @@
-"""Страницы презентаций лектора: конвертация, растеризация, кэш страниц.
+"""Материалы к лекции: страницы презентаций и фотографии доски, кэш страниц.
 
 Внешние программы (LibreOffice для не-PDF и poppler для растеризации)
-вызываются через subprocess; сетевых вызовов этап не делает.
+вызываются через subprocess; сетевых вызовов этап не делает. Фотографии
+доски конвертации не требуют: они копируются страница за страницей наравне
+со страницами колоды.
 """
 
 from __future__ import annotations
@@ -16,14 +18,32 @@ SLIDE_EXTENSIONS: frozenset[str] = frozenset(
     {".pdf", ".pptx", ".ppt", ".odp", ".key", ".docx", ".doc", ".odt"}
 )
 
+# Расширения изображений (фотографий доски), принимаемых наравне с колодами.
+PHOTO_EXTENSIONS: frozenset[str] = frozenset({".png", ".jpg", ".jpeg", ".webp"})
+
+# Расширения материалов к лекции, которые ищутся при передаче каталога.
+MATERIAL_EXTENSIONS: frozenset[str] = SLIDE_EXTENSIONS | PHOTO_EXTENSIONS
+
+# Вид материала в записях страниц: страница презентации или фотография доски.
+KIND_SLIDE = "slide"
+KIND_PHOTO = "photo"
+
 # Имя файла-подписи источника в его каталоге кэша.
 SIGNATURE_NAME = "signature.json"
 
-# Шаблон имён страниц, которые пишет pdftoppm: page-01.png, page-001.png.
-PAGE_GLOB = "page-*.png"
+# Шаблон имён страниц в каталоге источника: pdftoppm пишет page-01.png, а
+# фотография копируется туда как page-001.jpg.
+PAGE_GLOB = "page-*"
+
+# Номер единственной страницы фотографии в каталоге источника.
+PHOTO_PAGE = 1
 
 # Ширина номера в именах итоговых картинок: slide_001.png сортируется как число.
-SLIDE_INDEX_WIDTH = 3
+INDEX_WIDTH = 3
+
+# Начала имён итоговых картинок: slide_NNN.png и photo_NNN.jpg.
+SLIDE_PREFIX = "slide_"
+PHOTO_PREFIX = "photo_"
 
 
 class SlidesError(Exception):
@@ -42,11 +62,12 @@ def _tool(name: str) -> str:
 
 
 def resolve_slide_sources(raw: list[str]) -> list[Path]:
-    """Развернуть значения --slides в список файлов презентаций.
+    """Развернуть значения --slides в список файлов материалов к лекции.
 
-    Файл берётся как есть, каталог разворачивается в файлы SLIDE_EXTENSIONS
-    (отсортированные), порядок аргументов сохраняется. Возвращаются
-    абсолютные пути; повторы по каноническому пути отбрасываются.
+    Файл берётся как есть, каталог разворачивается в файлы MATERIAL_EXTENSIONS
+    (презентации и изображения, отсортированные), порядок аргументов
+    сохраняется. Возвращаются абсолютные пути; повторы по каноническому пути
+    отбрасываются.
     """
     resolved: list[Path] = []
     for value in raw:
@@ -55,12 +76,13 @@ def resolve_slide_sources(raw: list[str]) -> list[Path]:
             candidates = [path]
         elif path.is_dir():
             candidates = sorted(p.resolve() for p in path.iterdir()
-                                if p.is_file() and p.suffix.lower() in SLIDE_EXTENSIONS)
+                                if p.is_file() and p.suffix.lower() in MATERIAL_EXTENSIONS)
             if not candidates:
-                raise SlidesError(f"в каталоге {value} не найдено презентаций с расширениями "
-                                  + ", ".join(sorted(SLIDE_EXTENSIONS)))
+                raise SlidesError(f"в каталоге {value} не найдено презентаций и изображений "
+                                  "с расширениями "
+                                  + ", ".join(sorted(MATERIAL_EXTENSIONS)))
         else:
-            raise SlidesError(f"путь презентации не существует: {value}")
+            raise SlidesError(f"путь материала не существует: {value}")
         for candidate in candidates:
             if candidate not in resolved:
                 resolved.append(candidate)
@@ -68,13 +90,13 @@ def resolve_slide_sources(raw: list[str]) -> list[Path]:
 
 
 def _page_number(path: Path) -> int:
-    """Номер страницы из имени файла pdftoppm (page-NNN.png)."""
+    """Номер страницы из имени файла в каталоге источника (page-NNN.png)."""
     return int(path.stem.rsplit("-", 1)[1])
 
 
 def _sorted_pages(directory: Path) -> list[Path]:
     """Страницы из каталога по возрастанию номера (ширина нумерации не важна)."""
-    return sorted(directory.glob(PAGE_GLOB), key=_page_number)
+    return sorted((p for p in directory.glob(PAGE_GLOB) if p.is_file()), key=_page_number)
 
 
 def _cached_pages(source_dir: Path, signature: dict) -> list[Path] | None:
@@ -126,27 +148,46 @@ def _rasterize(pdf: Path, source_dir: Path, dpi: int) -> list[Path]:
     return pages
 
 
+def _photo_page(source: Path, source_dir: Path) -> list[Path]:
+    """Скопировать фотографию в каталог источника единственной страницей.
+
+    Расширение сохраняется: data-URL для vision-запроса берётся по имени
+    файла, а копия с чужим расширением уехала бы в API с неверным MIME-типом.
+    """
+    page = source_dir / f"page-{PHOTO_PAGE:0{INDEX_WIDTH}d}{source.suffix.lower()}"
+    shutil.copy2(source, page)
+    return [page]
+
+
 def prepare_slides(sources: list[Path], images_dir: Path, work_dir: Path, dpi: int,
                    force: bool = False) -> list[dict]:
-    """Разложить презентации в страницы картинок; вернуть записи страниц.
+    """Разложить презентации и фотографии в картинки; вернуть записи страниц.
 
     Каждый источник получает подкаталог кэша work_dir/<номер>_<имя_без_расширения>:
     не-PDF конвертируется туда LibreOffice (--convert-to pdf), затем страницы
-    растрируются pdftoppm с разрешением dpi в page-NNN.png. Кэш принимается,
-    если совпала подпись signature.json (канонический путь источника, его
-    размер и mtime, а также dpi) и в подкаталоге есть страницы; иначе подкаталог
-    стирается и источник обрабатывается заново. Страницы копируются в images_dir
-    как slide_NNN.png сквозной нумерацией по всем источникам, чужие slide_*.png
-    из прошлого прогона удаляются (кадры frame_*.jpg не трогаются).
+    растрируются pdftoppm с разрешением dpi в page-NNN.png; фотография доски
+    копируется туда как единственная страница page-001.<расширение>. Кэш
+    принимается, если совпала подпись signature.json (канонический путь
+    источника, его размер и mtime, а также dpi) и в подкаталоге есть страницы;
+    иначе подкаталог стирается и источник обрабатывается заново. Страницы
+    презентаций копируются в images_dir как slide_NNN.png, фотографии — как
+    photo_NNN.<расширение>; нумерация сквозная по источникам своего вида, чужие
+    slide_* и photo_* из прошлого прогона удаляются (кадры frame_*.jpg не
+    трогаются).
 
-    Возвращаются записи {"image", "page", "source", "source_page"} по порядку:
-    источник за источником, страница за страницей.
+    Возвращаются записи {"image", "page", "kind", "source", "source_page"} по
+    порядку: источник за источником, страница за страницей. kind — KIND_SLIDE
+    для страницы колоды или KIND_PHOTO для фотографии доски; по нему описание
+    выбирает промпт, а синтез — подпись и раздел. page — номер внутри своего
+    вида (у фотографии всегда 1), source_page — страница внутри источника.
     """
     images_dir.mkdir(parents=True, exist_ok=True)
     work_dir.mkdir(parents=True, exist_ok=True)
 
     entries: list[dict] = []
+    counters = {KIND_SLIDE: 0, KIND_PHOTO: 0}
     for index, source in enumerate(sources, start=1):
+        kind = KIND_PHOTO if source.suffix.lower() in PHOTO_EXTENSIONS else KIND_SLIDE
         source_dir = work_dir / f"{index:02d}_{source.stem}"
         # Подпись — по состояния источника на диске: правка файла или смена dpi
         # делают кэш недействительным.
@@ -156,20 +197,24 @@ def prepare_slides(sources: list[Path], images_dir: Path, work_dir: Path, dpi: i
         if pages is None:
             shutil.rmtree(source_dir, ignore_errors=True)
             source_dir.mkdir(parents=True, exist_ok=True)
-            pages = _rasterize(_pdf_of(source, source_dir), source_dir, dpi)
+            pages = (_photo_page(source, source_dir) if kind == KIND_PHOTO
+                     else _rasterize(_pdf_of(source, source_dir), source_dir, dpi))
             (source_dir / SIGNATURE_NAME).write_text(
                 json.dumps(signature, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"  {source.name}: {len(pages)} страниц")
         for page in pages:
-            page_number = _page_number(page)
-            out_index = len(entries) + 1
-            name = f"slide_{out_index:0{SLIDE_INDEX_WIDTH}d}.png"
+            counters[kind] += 1
+            # У фотографии сохраняется её расширение, у страницы колоды — .png.
+            suffix = page.suffix if kind == KIND_PHOTO else ".png"
+            prefix = PHOTO_PREFIX if kind == KIND_PHOTO else SLIDE_PREFIX
+            name = f"{prefix}{counters[kind]:0{INDEX_WIDTH}d}{suffix}"
             shutil.copy2(page, images_dir / name)
-            entries.append({"image": name, "page": out_index, "source": str(source),
-                            "source_page": page_number})
+            entries.append({"image": name, "page": counters[kind], "kind": kind,
+                            "source": str(source), "source_page": _page_number(page)})
 
     names = {entry["image"] for entry in entries}
-    for stale in images_dir.glob("slide_*.png"):
-        if stale.name not in names:
+    for stale in images_dir.iterdir():
+        if (stale.is_file() and stale.name not in names
+                and stale.name.startswith((SLIDE_PREFIX, PHOTO_PREFIX))):
             stale.unlink()
     return entries

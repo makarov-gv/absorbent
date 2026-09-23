@@ -1,4 +1,4 @@
-"""Тесты этапа презентаций: разворачивание путей, растеризация, кэш страниц."""
+"""Тесты этапа материалов: разворачивание путей, растеризация и копирование, кэш страниц."""
 
 from __future__ import annotations
 
@@ -11,7 +11,11 @@ import pytest
 from PIL import Image
 
 from absorbent.slides import (
+    KIND_PHOTO,
+    KIND_SLIDE,
+    MATERIAL_EXTENSIONS,
     PAGE_GLOB,
+    PHOTO_EXTENSIONS,
     SIGNATURE_NAME,
     SLIDE_EXTENSIONS,
     SlidesError,
@@ -121,8 +125,8 @@ class TestResolveSlideSources:
         with pytest.raises(SlidesError) as err:
             resolve_slide_sources([str(tmp_path)])
         message = str(err.value)
-        assert "не найдено презентаций" in message
-        assert ".pdf" in message and ".pptx" in message
+        assert "не найдено презентаций и изображений" in message
+        assert ".pdf" in message and ".pptx" in message and ".jpg" in message
 
     def test_missing_path_raises(self, tmp_path: Path) -> None:
         with pytest.raises(SlidesError, match="не существует"):
@@ -146,6 +150,23 @@ class TestResolveSlideSources:
         assert {".pdf", ".pptx", ".odp"} <= SLIDE_EXTENSIONS
         assert ".txt" not in SLIDE_EXTENSIONS
 
+    def test_photo_file_kept_as_is(self, tmp_path: Path) -> None:
+        """Фотография доски — такой же аргумент --slides, как колода."""
+        photo = tmp_path / "доска.JPG"
+        photo.write_bytes(b"\xff\xd8\xff\xe0")
+        assert resolve_slide_sources([str(photo)]) == [photo]
+
+    def test_directory_expands_photos_alongside_slides(self, tmp_path: Path) -> None:
+        (tmp_path / "доска.jpg").write_bytes(b"\xff\xd8\xff\xe0")
+        (tmp_path / "a.pdf").write_bytes(b"%PDF")
+        (tmp_path / "notes.txt").write_bytes(b"x")
+        assert [p.name for p in resolve_slide_sources([str(tmp_path)])] == ["a.pdf", "доска.jpg"]
+
+    def test_material_extensions_cover_both_kinds(self) -> None:
+        assert MATERIAL_EXTENSIONS == SLIDE_EXTENSIONS | PHOTO_EXTENSIONS
+        assert {".png", ".jpg", ".jpeg"} <= PHOTO_EXTENSIONS
+        assert ".pdf" not in PHOTO_EXTENSIONS
+
 
 class TestPrepareSlides:
     def test_pdftoppm_command_and_copied_pages(self, slide_env: SimpleNamespace) -> None:
@@ -157,10 +178,10 @@ class TestPrepareSlides:
              str(source_dir / "page")],
         ]
         assert entries == [
-            {"image": "slide_001.png", "page": 1, "source": str(slide_env.deck),
-             "source_page": 1},
-            {"image": "slide_002.png", "page": 2, "source": str(slide_env.deck),
-             "source_page": 2},
+            {"image": "slide_001.png", "page": 1, "kind": KIND_SLIDE,
+             "source": str(slide_env.deck), "source_page": 1},
+            {"image": "slide_002.png", "page": 2, "kind": KIND_SLIDE,
+             "source": str(slide_env.deck), "source_page": 2},
         ]
         assert sorted(p.name for p in slide_env.images.iterdir()) == [
             "slide_001.png", "slide_002.png"]
@@ -184,6 +205,48 @@ class TestPrepareSlides:
         assert [entry["source_page"] for entry in entries] == [1, 2, 3, 1, 2]
         assert [entry["source"] for entry in entries] == [str(first)] * 3 + [str(second)] * 2
         assert (tmp_path / "work" / "02_deck_b" / SIGNATURE_NAME).exists()
+
+    def test_photo_copied_without_external_tools(self, slide_env: SimpleNamespace) -> None:
+        """Фотография доски копируется как одна страница, без pdftoppm и soffice."""
+        photo = slide_env.deck.with_name("доска.JPG")
+        photo.write_bytes(b"\xff\xd8\xff\xe0photo")
+        entries = prepare_slides([photo], slide_env.images, slide_env.work, 150)
+        assert slide_env.runner.calls == []
+        assert entries == [
+            {"image": "photo_001.jpg", "page": 1, "kind": KIND_PHOTO,
+             "source": str(photo), "source_page": 1},
+        ]
+        # Расширение приводится к нижнему регистру: по нему берётся MIME-тип.
+        assert (slide_env.images / "photo_001.jpg").read_bytes() == b"\xff\xd8\xff\xe0photo"
+        assert (slide_env.work / "01_доска" / SIGNATURE_NAME).exists()
+
+    def test_deck_and_photo_numbered_per_kind(self, slide_env: SimpleNamespace) -> None:
+        """Нумерация сквозная внутри вида: фотография не сдвигает номера слайдов."""
+        photo = slide_env.deck.with_name("доска.jpg")
+        photo.write_bytes(b"\xff\xd8\xff\xe0photo")
+        entries = prepare_slides([slide_env.deck, photo], slide_env.images, slide_env.work, 150)
+        assert [(entry["image"], entry["page"], entry["kind"]) for entry in entries] == [
+            ("slide_001.png", 1, KIND_SLIDE),
+            ("slide_002.png", 2, KIND_SLIDE),
+            ("photo_001.jpg", 1, KIND_PHOTO),
+        ]
+
+    def test_photo_restored_from_cache(self, slide_env: SimpleNamespace) -> None:
+        photo = slide_env.deck.with_name("доска.jpg")
+        photo.write_bytes(b"\xff\xd8\xff\xe0photo")
+        entries = prepare_slides([photo], slide_env.images, slide_env.work, 150)
+        (slide_env.images / "photo_001.jpg").unlink()
+        again = prepare_slides([photo], slide_env.images, slide_env.work, 150)
+        assert again == entries
+        assert (slide_env.images / "photo_001.jpg").exists()
+
+    def test_stale_photos_removed(self, slide_env: SimpleNamespace) -> None:
+        slide_env.images.mkdir(parents=True)
+        (slide_env.images / "photo_007.png").write_bytes(b"old photo")
+        (slide_env.images / "frame_00_00_00.jpg").write_bytes(b"frame")
+        prepare_slides([slide_env.deck], slide_env.images, slide_env.work, 150)
+        assert not (slide_env.images / "photo_007.png").exists()
+        assert (slide_env.images / "frame_00_00_00.jpg").exists()
 
     def test_second_run_restores_image_from_cache(self, slide_env: SimpleNamespace) -> None:
         entries = slide_env.module.prepare_slides([slide_env.deck], slide_env.images,

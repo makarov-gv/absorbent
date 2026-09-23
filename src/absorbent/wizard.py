@@ -38,7 +38,7 @@ from prompt_toolkit.widgets import (
 
 from absorbent.cli import MEDIA_EXTENSIONS
 from absorbent.config import Config
-from absorbent.slides import SLIDE_EXTENSIONS, SlidesError, resolve_slide_sources
+from absorbent.slides import MATERIAL_EXTENSIONS, SlidesError, resolve_slide_sources
 
 # Значения-пункты в списках диалогов: сами по себе они не пути.
 OTHER_DIRECTORY = "\x00каталог"
@@ -59,8 +59,8 @@ NUMBER_QUESTIONS: tuple[tuple[str, str, str, float, float, Callable[[str], float
 SKIP_CHOICES: tuple[tuple[str, str], ...] = (
     ("--skip-stt", "--skip-stt — распознавание речи"),
     ("--skip-frames", "--skip-frames — кадры видео"),
-    ("--skip-slides", "--skip-slides — презентации"),
-    ("--skip-describe", "--skip-describe — описание кадров и слайдов"),
+    ("--skip-slides", "--skip-slides — презентации и фотографии"),
+    ("--skip-describe", "--skip-describe — описание кадров, слайдов и фотографий"),
     ("--skip-synthesize", "--skip-synthesize — синтез конспекта"),
     ("--skip-render", "--skip-render — таблицы, HTML, PDF"),
 )
@@ -351,10 +351,11 @@ def _choose_input(console: Console, start_dir: Path) -> Path | None:
 
 
 def _choose_slides(console: Console, input_path: Path, start_dir: Path) -> list[Path] | None:
-    """Выбрать презентации: отметки в списке, другой каталог или ручной путь.
+    """Выбрать материалы к лекции: отметки в списке, другой каталог или ручной путь.
 
-    Пустая отметка означает «без слайдов». Один кандидат с именем записи
-    (например Lecture.m4a и Lecture.pdf) отмечается заранее; молча ничего не
+    В списке — презентации и изображения (фотографии доски). Пустая отметка
+    означает «без материалов». Один кандидат с именем записи (например
+    Lecture.m4a и Lecture.pdf) отмечается заранее; молча ничего не
     подставляется — пользователь видит отметку в диалоге.
     """
     candidates: list[Path] = []
@@ -362,7 +363,7 @@ def _choose_slides(console: Console, input_path: Path, start_dir: Path) -> list[
         for path in sorted(directory.iterdir()):
             # Канонический путь: тот же файл, добавленный вручную, не дублируется.
             resolved = path.resolve()
-            if (path.is_file() and path.suffix.lower() in SLIDE_EXTENSIONS
+            if (path.is_file() and path.suffix.lower() in MATERIAL_EXTENSIONS
                     and resolved not in candidates):
                 candidates.append(resolved)
     preset = [str(p) for p in candidates if p.stem == input_path.stem]
@@ -370,28 +371,29 @@ def _choose_slides(console: Console, input_path: Path, start_dir: Path) -> list[
     while True:
         listed = candidates + [path for path in extra if path not in candidates]
         values = [(str(p), str(p)) for p in listed]
-        values += [(OTHER_DIRECTORY, "Добавить слайды из другого каталога…"),
+        values += [(OTHER_DIRECTORY, "Добавить материалы из другого каталога…"),
                    (MANUAL_PATH, "Указать путь к файлу или каталогу…")]
         chosen = console.select_many(
-            "Презентация",
-            f"Отметьте слайды к «{input_path.name}».\n"
-            "Пробел — отметить, Esc — подтвердить. Ничего не отмечено — конспект без слайдов.",
+            "Материалы к лекции",
+            f"Отметьте презентации и фотографии доски к «{input_path.name}».\n"
+            "Пробел — отметить, Esc — подтвердить. Ничего не отмечено — конспект "
+            "без материалов.",
             values, defaults=preset)
         if chosen is None:
             return None
         if OTHER_DIRECTORY in chosen or MANUAL_PATH in chosen:
             from_directory = OTHER_DIRECTORY in chosen
             raw = console.text(
-                "Каталог со слайдами" if from_directory else "Слайды",
-                "Путь к каталогу с презентациями:" if from_directory
-                else "Путь к файлу презентации или каталогу с ними:",
+                "Каталог с материалами" if from_directory else "Материалы",
+                "Путь к каталогу с презентациями и фотографиями:" if from_directory
+                else "Путь к файлу материала (презентация, фотография) или каталогу с ними:",
                 default=str(start_dir), only_directories=from_directory)
             if raw is None:
                 return None
             try:
                 added = resolve_slide_sources([raw])
             except SlidesError as exc:
-                console.message("Слайды не найдены", str(exc))
+                console.message("Материалы не найдены", str(exc))
                 continue
             for path in added:
                 if path not in extra:

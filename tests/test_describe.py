@@ -249,9 +249,9 @@ class TestDescribeSlides:
         out = tmp_path / "slide_descriptions.json"
         result = describe_slides(VISION_SPEC, _provider(), slides, images_dir, "ru", out)
         assert result == {
-            "slide_001.png": {"page": 1, "source": "/decks/Лекция 4.pdf",
+            "slide_001.png": {"page": 1, "source": "/decks/Лекция 4.pdf", "kind": "slide",
                               "description": "первый слайд"},
-            "slide_002.png": {"page": 2, "source": "/decks/Лекция 4.pdf",
+            "slide_002.png": {"page": 2, "source": "/decks/Лекция 4.pdf", "kind": "slide",
                               "description": "второй слайд"},
         }
         saved = json.loads(out.read_text(encoding="utf-8"))
@@ -293,6 +293,26 @@ class TestDescribeSlides:
                         tmp_path / "slide_descriptions.json")
         system = fake_openai.chat.completions.calls[0]["messages"][0]["content"]
         assert "содержимое страницы презентации" in system
+
+    def test_photo_described_with_board_prompt(self, tmp_path: Path, fake_openai,
+                                               monkeypatch: pytest.MonkeyPatch) -> None:
+        """Снимок доски описывается промптом доски, а не промптом слайда."""
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        images_dir = tmp_path / "images"
+        _make_image(images_dir, "photo_001.jpg")
+        fake_openai.set_replies(["формула на доске"])
+        photo = {"image": "photo_001.jpg", "page": 1, "kind": "photo",
+                 "source": "/снимки/доска.jpg", "source_page": 1}
+        out = tmp_path / "slide_descriptions.json"
+        result = describe_slides(VISION_SPEC, _provider(), [photo], images_dir, "ru", out)
+        assert result == {"photo_001.jpg": {"page": 1, "source": "/снимки/доска.jpg",
+                                            "kind": "photo", "description": "формула на доске"}}
+        call = fake_openai.chat.completions.calls[0]
+        assert "содержимое фотографии доски" in call["messages"][0]["content"]
+        assert call["messages"][1]["content"][0]["text"] == (
+            "Фотография доски (файл доска.jpg), снятая на лекции.\nОпиши содержимое снимка.")
+        assert call["messages"][1]["content"][1]["image_url"]["url"].startswith(
+            "data:image/jpeg;base64,")
 
     def test_skips_existing_without_force(self, tmp_path: Path, fake_openai,
                                           monkeypatch: pytest.MonkeyPatch) -> None:
@@ -340,7 +360,7 @@ class TestDescribeSlides:
         monkeypatch.setattr(completions, "create", _flaky)
         result = describe_slides(VISION_SPEC, _provider(), [self._slide(1), self._slide(2)],
                                  images_dir, "ru", tmp_path / "slide_descriptions.json")
-        assert "(ошибка описания слайда: network down)" in result["slide_001.png"]["description"]
+        assert "(ошибка описания: network down)" in result["slide_001.png"]["description"]
         assert result["slide_002.png"]["description"] == "второй слайд"
 
     def test_missing_api_key_raises(self, tmp_path: Path, fake_openai,

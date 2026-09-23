@@ -47,29 +47,31 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
     <каталог входа>/.absorbent/<имя>/.
 
     Порядок этапов: извлечение кадров -> отбор ключевых кадров ->
-    растеризация презентаций -> распознавание речи -> описание кадров и
-    страниц презентации -> синтез Markdown -> постпроцессинг (таблицы, HTML,
-    PDF). Вход без видеопотока (аудиофайл) пропускает все этапы кадров:
-    остаётся транскрипт и конспект без иллюстраций, а каталогов кадров
-    (frames/ и images/) не появляется вовсе — так же ведёт себя прогон без
-    `--slides`.
+    подготовка презентаций и фотографий доски -> распознавание речи ->
+    описание кадров и материалов -> синтез Markdown -> постпроцессинг
+    (таблицы, HTML, PDF). Вход без видеопотока (аудиофайл) пропускает все
+    этапы кадров: остаётся транскрипт и конспект без иллюстраций, а каталогов
+    кадров (frames/ и images/) не появляется вовсе — так же ведёт себя прогон
+    без `--slides`.
 
-    Презентации к лекции задаются `--slides` (файл или каталог, флаг можно
-    повторять): каждая страница растрируется в `--slides-dpi` и описывается
-    той же vision-моделью, что кадры, а описания уходят в синтез отдельным
-    разделом «Слайды презентации» с меткой «слайд N». Автоподбор презентации
-    по имени записи не делается: рядом с записью лежит PDF, собранный самим
-    absorbent из предыдущего конспекта. Этап отключается `--skip-slides`.
+    Материалы к лекции задаются `--slides` (файл или каталог, флаг можно
+    повторять): страницы презентации растрируются в `--slides-dpi`, а
+    фотографии доски копируются как есть; и то и другое описывается той же
+    vision-моделью, что кадры. Описания уходят в синтез отдельными разделами:
+    страницы — «Слайды презентации» с меткой «слайд N», снимки — «Фотографии
+    доски». Автоподбор презентации по имени записи не делается: рядом с
+    записью лежит PDF, собранный самим absorbent из предыдущего конспекта.
+    Этап отключается `--skip-slides`.
 
     Признак готового этапа — его артефакт: transcript.json, keyframes.json,
-    descriptions.json, slide_descriptions.json, notes.md; страницы презентаций
+    descriptions.json, slide_descriptions.json, notes.md; материалы
     принимаются по подписи источника в каталоге `slides/` (путь, размер, mtime
-    и dpi), поэтому правка колоды или смена `--slides-dpi` заставляют
-    растеризовать её заново. Постпроцессинг пропускается, когда HTML и PDF не
-    старше notes.md. Каждый этап уважает свой `--skip-*` флаг, постпроцессинг
-    отключается `--skip-render`, а полный перезапуск даёт `--force` — он же
-    нужен, если сменился `--output-language`: готовый notes.md
-    переиспользуется как есть.
+    и dpi), поэтому правка колоды, замена снимка или смена `--slides-dpi`
+    заставляют подготовить материал заново. Постпроцессинг пропускается,
+    когда HTML и PDF не старше notes.md. Каждый этап уважает свой `--skip-*`
+    флаг, постпроцессинг отключается `--skip-render`, а полный перезапуск даёт
+    `--force` — он же нужен, если сменился `--output-language`: готовый
+    notes.md переиспользуется как есть.
 
     Язык распознавания речи (`--language`) и язык результата
     (`--output-language`) — независимые оси: первый лишь подсказывает whisper
@@ -104,7 +106,7 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
     slides_dir = cache / "slides"
     slide_descriptions_path = cache / "slide_descriptions.json"
     # Конвейер заводит только каталоги результата и кэша: каталоги картинок
-    # (frames/ и images/) создают сами этапы кадров и презентаций, и только
+    # (frames/ и images/) создают сами этапы кадров и материалов, и только
     # тогда, когда картинки есть, поэтому аудиовход без слайдов не оставляет
     # пустых каталогов.
     for directory in (output_dir, cache):
@@ -130,11 +132,11 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
     slides: list[dict] = []
     slide_sources = getattr(args, "slides", [])
     if slide_sources and not getattr(args, "skip_slides", False):
-        print(f"[{stem}] растеризация презентаций: {len(slide_sources)}...")
+        print(f"[{stem}] подготовка материалов к лекции: {len(slide_sources)}...")
         slides = prepare_slides(slide_sources, images_dir, slides_dir,
                                 getattr(args, "slides_dpi", 150), force=args.force)
     elif slide_sources:
-        print(f"[{stem}] презентации пропущены (--skip-slides)")
+        print(f"[{stem}] материалы к лекции пропущены (--skip-slides)")
 
     print(f"[{stem}] распознавание речи...")
     if not args.skip_stt:
@@ -155,7 +157,7 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
         else:
             descriptions = _cached_dict(descriptions_path)
         if slides:
-            print(f"[{stem}] описание {len(slides)} слайдов...")
+            print(f"[{stem}] описание материалов к лекции: {len(slides)}...")
             slide_descriptions = describe_slides(vision_spec, vision_provider, slides, images_dir,
                                                  output_language, slide_descriptions_path,
                                                  force=args.force)

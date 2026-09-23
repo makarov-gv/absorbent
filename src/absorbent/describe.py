@@ -8,6 +8,7 @@ import mimetypes
 from pathlib import Path
 
 from absorbent.config import ModelSpec, Provider, api_key_from
+from absorbent.slides import KIND_PHOTO, KIND_SLIDE
 
 # Окно транскрипта вокруг кадра, подаваемое модели (в обе стороны, секунды).
 TRANSCRIPT_WINDOW_SECONDS = 60
@@ -46,6 +47,26 @@ SLIDE_SYSTEM_PROMPTS: dict[str, str] = {
         "chart captions; transcribe the slide text as verbatim as possible, in its original "
         "language. Answer in English (except verbatim slide text). Be concise (2–5 sentences "
         "or a bullet list), no filler. Return only the description."
+    ),
+}
+
+
+PHOTO_SYSTEM_PROMPTS: dict[str, str] = {
+    "ru": (
+        "Ты извлекаешь содержимое фотографии доски с лекции. На вход: снимок, сделанный "
+        "в аудитории. Перечисли, что на нём написано и нарисовано: формулы в LaTeX "
+        "($...$), определения, схемы со стрелками и подписями, графики; надписи приводи "
+        "по возможности дословно, на языке оригинала, а неразборчивые места помечай как "
+        "неразборчивые. Отвечай на русском языке (кроме дословного текста). Кратко "
+        "(2–5 предложений или список), без воды. Верни только описание."
+    ),
+    "en": (
+        "You extract the content of a photo of a lecture board. Input: a snapshot taken in "
+        "the classroom. List what is written and drawn on it: formulas in LaTeX ($...$), "
+        "definitions, diagrams with arrows and captions, plots; transcribe the notes as "
+        "verbatim as possible, in their original language, and mark illegible places as "
+        "illegible. Answer in English (except verbatim text). Be concise (2–5 sentences or a "
+        "bullet list), no filler. Return only the description."
     ),
 }
 
@@ -146,14 +167,18 @@ def describe_keyframes(vision_spec: ModelSpec, provider: Provider, keyframes: li
 def describe_slides(vision_spec: ModelSpec, provider: Provider, slides: list[dict],
                     images_dir: Path, output_language: str, out_json: Path,
                     force: bool = False) -> dict:
-    """Описать каждую страницу презентации; вернуть и записать slide_descriptions.json.
+    """Описать каждую страницу презентации и фотографию доски; записать JSON.
 
     Формат: {"slide_003.png": {"page": 3, "source": "/путь/колода.pdf",
-    "description": str}}. Язык описания — output_language (ru/en), промпт
-    выбирается по нему с запасом на 'ru'. Уже описанные страницы (без force)
+    "kind": "slide", "description": str}} и {"photo_001.jpg": {"page": 1,
+    "source": "/путь/доска.jpg", "kind": "photo", "description": str}}. Язык
+    описания — output_language (ru/en), промпт выбирается по нему с запасом на
+    'ru'. Вид материала (kind, по умолчанию страница презентации) выбирает
+    промпт: у страницы колоды и у снимка доски разное содержимое — печатный
+    слайд против рукописной записи. Уже описанные страницы (без force)
     пропускаются, ошибка API на странице не прерывает прогон: в описание
-    пишется текст ошибки. Транскрипт лекции не передаётся: страницы не имеют
-    таймкода, сопоставление делает синтез по содержанию.
+    пишется текст ошибки. Транскрипт лекции не передаётся: ни у страницы, ни у
+    снимка нет таймкода, сопоставление делает синтез по содержанию.
     """
     from openai import OpenAI
 
@@ -161,7 +186,9 @@ def describe_slides(vision_spec: ModelSpec, provider: Provider, slides: list[dic
     if out_json.exists() and not force:
         descriptions = json.loads(out_json.read_text(encoding="utf-8"))
 
-    system_prompt = SLIDE_SYSTEM_PROMPTS[_prompt_language(output_language)]
+    language = _prompt_language(output_language)
+    slide_prompt = SLIDE_SYSTEM_PROMPTS[language]
+    photo_prompt = PHOTO_SYSTEM_PROMPTS[language]
 
     api_key = api_key_from(provider)
     client = OpenAI(base_url=provider.base_url, api_key=api_key)
@@ -170,14 +197,21 @@ def describe_slides(vision_spec: ModelSpec, provider: Provider, slides: list[dic
     for entry in pending:
         name = entry["image"]
         image_path = images_dir / name
-        prompt = (f"Слайд {entry['page']} из {len(slides)} "
-                  f"(файл {Path(entry['source']).name}).\n"
-                  "Опиши содержимое слайда.")
+        source_name = Path(entry["source"]).name
+        if entry.get("kind", KIND_SLIDE) == KIND_PHOTO:
+            system_prompt = photo_prompt
+            prompt = (f"Фотография доски (файл {source_name}), снятая на лекции.\n"
+                      "Опиши содержимое снимка.")
+        else:
+            system_prompt = slide_prompt
+            prompt = (f"Слайд {entry['page']} из {len(slides)} "
+                      f"(файл {source_name}).\n"
+                      "Опиши содержимое слайда.")
         try:
             text = _vision_answer(client, vision_spec.api_model, system_prompt, prompt, image_path)
         except Exception as exc:  # ошибка одной страницы не должна ронять весь прогон.
-            text = f"(ошибка описания слайда: {exc})"
+            text = f"(ошибка описания: {exc})"
         descriptions[name] = {"page": entry["page"], "source": entry["source"],
-                              "description": text}
+                              "kind": entry.get("kind", KIND_SLIDE), "description": text}
         out_json.write_text(json.dumps(descriptions, ensure_ascii=False, indent=2), encoding="utf-8")
     return descriptions
