@@ -301,3 +301,30 @@ class TestPhotosInMessage:
         content = fake_openai.chat.completions.calls[0]["messages"][1]["content"]
         assert "Слайды презентации" not in content
         assert "Фотографии доски (снимки, сделанные на лекции):" in content
+
+
+class TestPromptSourceHierarchy:
+    """Промпт объявляет транскрипт источником, а слайды и снимки — справочным материалом."""
+
+    def test_ru_prompt_states_transcript_is_primary(self, tmp_path: Path, fake_openai,
+                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        fake_openai.set_replies(["ок"])
+        run_synthesize(LLM_SPEC, _provider(), [], {}, "ru", tmp_path / "notes.md")
+        system = fake_openai.chat.completions.calls[0]["messages"][0]["content"]
+        assert "транскрипт с таймкодами — это речь лектора и единственный источник" in system
+        assert "слайд, содержание которого не прозвучало в транскрипте" in system
+        assert "«слайд N»" in system
+        assert "![Слайд N](images/<имя_файла>)" in system
+        assert "![Фотография доски](images/<имя_файла>)" in system
+
+    def test_en_prompt_states_transcript_is_primary(self, tmp_path: Path, fake_openai,
+                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        fake_openai.set_replies(["ok"])
+        run_synthesize(LLM_SPEC, _provider(), [], {}, "en", tmp_path / "notes.md")
+        system = fake_openai.chat.completions.calls[0]["messages"][0]["content"]
+        assert "the only source of what actually happened in the lecture" in system
+        assert "a slide whose content was never spoken about does not appear" in system
+        assert "![Slide N](images/<filename>)" in system
+        assert "![Board photo](images/<filename>)" in system
