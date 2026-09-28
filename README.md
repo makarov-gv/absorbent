@@ -549,3 +549,8 @@ HTML/PDF можно отключить флагом `--skip-render` (напри�
 - Тесты: `uv run pytest --cov` (покрытие ветвей 100%, порог задан в
   `pyproject.toml` через `fail_under = 100`). Интеграционные тесты требуют
   ffmpeg/ffprobe и pdftoppm в PATH и пропускаются без них.
+
+## Почему GNU GPL v3
+
+<https://lukesmith.xyz/articles/why-i-use-the-gpl-and-not-cuck-licenses/>.
+
