@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from absorbent.config import ConfigError, ModelSpec, Provider
+from absorbent.config import PLACEHOLDER_API_KEY, ConfigError, ModelSpec, Provider
 from absorbent.describe import (
     _data_url,
     _prompt_language,
@@ -217,14 +217,15 @@ class TestDescribeKeyframes:
                                tmp_path / "descriptions.json")
 
     def test_no_key_for_empty_env_name(self, tmp_path: Path, fake_openai) -> None:
-        # api_key_env == "" -> api_key_from возвращает None без ошибки.
+        # api_key_env == "" -> клиенту уходит заглушка: OpenAI SDK не принимает
+        # api_key=None, а подставлять чужой OPENAI_API_KEY из окружения нельзя.
         _, images_dir = self._setup(tmp_path)
         fake_openai.set_replies(["описание"])
         keyframes = [self._frame(0.0)]
         provider = Provider(name="local", base_url="http://127.0.0.1:9/v1", api_key_env="")
         describe_keyframes(VISION_SPEC, provider, keyframes, [], images_dir, "ru",
                            tmp_path / "descriptions.json")
-        assert fake_openai.api_key is None
+        assert fake_openai.instances[-1].api_key == PLACEHOLDER_API_KEY
 
 
 class TestDescribeSlides:

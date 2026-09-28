@@ -19,6 +19,12 @@ class ConfigError(Exception):
     """Ошибка конфигурации: отсутствующий файл, ключ или переменная окружения."""
 
 
+# Ключ-заглушка для провайдеров без авторизации: клиент OpenAI SDK не
+# принимает api_key=None, а подставлять ему реальный OPENAI_API_KEY из
+# окружения нельзя — тот уехал бы на чужой (например, локальный) сервер.
+PLACEHOLDER_API_KEY = "not-needed"
+
+
 @dataclass
 class Provider:
     """Провайдер OpenAI-совместимого API."""
@@ -83,7 +89,11 @@ class Config:
 
 
 def api_key_from(provider: Provider) -> str | None:
-    """Ключ API провайдера из переменной окружения; None при пустой api_key_env."""
+    """Ключ API провайдера из переменной окружения; None при пустой api_key_env.
+
+    None означает «своего ключа у провайдера нет»: клиенту OpenAI SDK его
+    заменяет PLACEHOLDER_API_KEY (None SDK не принимает).
+    """
     if not provider.api_key_env:
         return None
     value = os.environ.get(provider.api_key_env)

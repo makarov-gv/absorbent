@@ -7,7 +7,7 @@ import json
 import mimetypes
 from pathlib import Path
 
-from absorbent.config import ModelSpec, Provider, api_key_from
+from absorbent.config import PLACEHOLDER_API_KEY, ModelSpec, Provider, api_key_from
 from absorbent.slides import KIND_PHOTO, KIND_SLIDE
 
 # Окно транскрипта вокруг кадра, подаваемое модели (в обе стороны, секунды).
@@ -148,7 +148,7 @@ def describe_keyframes(vision_spec: ModelSpec, provider: Provider, keyframes: li
     system_prompt = SYSTEM_PROMPTS[prompt_lang]
 
     api_key = api_key_from(provider)
-    client = OpenAI(base_url=provider.base_url, api_key=api_key)
+    client = OpenAI(base_url=provider.base_url, api_key=api_key or PLACEHOLDER_API_KEY)
 
     pending = [kf for kf in keyframes if force or kf["image"] not in descriptions]
     for kf in pending:
@@ -191,7 +191,7 @@ def describe_slides(vision_spec: ModelSpec, provider: Provider, slides: list[dic
     photo_prompt = PHOTO_SYSTEM_PROMPTS[language]
 
     api_key = api_key_from(provider)
-    client = OpenAI(base_url=provider.base_url, api_key=api_key)
+    client = OpenAI(base_url=provider.base_url, api_key=api_key or PLACEHOLDER_API_KEY)
 
     pending = [entry for entry in slides if force or entry["image"] not in descriptions]
     for entry in pending:

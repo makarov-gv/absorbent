@@ -6,7 +6,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from absorbent.config import ModelSpec, Provider, api_key_from
+from absorbent.config import PLACEHOLDER_API_KEY, ModelSpec, Provider, api_key_from
 
 # Канонический промежуточный формат — transcript.json:
 # [{"start": float, "end": float, "text": str, "speaker": str | None}, ...]
@@ -83,7 +83,7 @@ def _voxtral_transcribe(spec: ModelSpec, provider: Provider, input_path: Path, l
     # Mistral; Bearer от OpenAI SDK дублируется на тот случай, если
     # OpenAI-совместимая прослойка ожидает именно его.
     extra_headers = {"X-Api-Key": api_key} if api_key else {}
-    client = OpenAI(base_url=provider.base_url, api_key=api_key)
+    client = OpenAI(base_url=provider.base_url, api_key=api_key or PLACEHOLDER_API_KEY)
     _extract_audio(input_path, audio_path)
 
     with open(audio_path, "rb") as audio_file:

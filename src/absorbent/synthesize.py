@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from absorbent.config import ModelSpec, Provider, api_key_from
+from absorbent.config import PLACEHOLDER_API_KEY, ModelSpec, Provider, api_key_from
 from absorbent.slides import KIND_PHOTO, KIND_SLIDE
 
 SYSTEM_PROMPTS: dict[str, str] = {
@@ -185,7 +185,7 @@ def run_synthesize(llm_spec: ModelSpec, provider: Provider, transcript: list[dic
         user_message += "\n\nФотографии доски (снимки, сделанные на лекции):\n" + photos
 
     api_key = api_key_from(provider)
-    client = OpenAI(base_url=provider.base_url, api_key=api_key)
+    client = OpenAI(base_url=provider.base_url, api_key=api_key or PLACEHOLDER_API_KEY)
     text = ""
     for attempt in range(SYNTHESIS_ATTEMPTS):
         response = client.chat.completions.create(
