@@ -3,6 +3,8 @@ name = "absorbent"
 version = "0.1.0"
 description = "Лекционное видео -> структурированный конспект в Markdown."
 readme = "README.md"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = [
     "openai>=1.0",
