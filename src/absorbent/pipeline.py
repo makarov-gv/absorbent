@@ -27,12 +27,6 @@ def _load_json(path: Path) -> list | dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _cached_dict(path: Path) -> dict:
-    """Словарь описаний из кэша: отсутствие файла или список дают {}."""
-    loaded = _load_json(path)
-    return loaded if isinstance(loaded, dict) else {}
-
-
 def _filter_by_images(items: dict, images: set[str]) -> dict:
     """Оставить описания текущего набора картинок: чужой отбор в синтез не идёт."""
     return {name: entry for name, entry in items.items() if name in images}
@@ -61,17 +55,18 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
     страницы — «Слайды презентации» с меткой «слайд N», снимки — «Фотографии
     доски». Автоподбор презентации по имени записи не делается: рядом с
     записью лежит PDF, собранный самим absorbent из предыдущего конспекта.
-    Этап отключается `--skip-slides`.
 
-    Признак готового этапа — его артефакт: transcript.json, keyframes.json,
-    descriptions.json, slide_descriptions.json, notes.md; материалы
-    принимаются по подписи источника в каталоге `slides/` (путь, размер, mtime
-    и dpi), поэтому правка колоды, замена снимка или смена `--slides-dpi`
-    заставляют подготовить материал заново. Постпроцессинг пропускается,
-    когда HTML и PDF не старше notes.md. Каждый этап уважает свой `--skip-*`
-    флаг, постпроцессинг отключается `--skip-render`, а полный перезапуск даёт
-    `--force` — он же нужен, если сменился `--output-language`: готовый
-    notes.md переиспользуется как есть.
+    Этапы выбирает кэш, а не флаги: признак готового этапа — его артефакт
+    (transcript.json, keyframes.json, descriptions.json,
+    slide_descriptions.json, notes.md), и без `--force` такой этап не
+    пересобирается. Пересобрать один этап — удалить его артефакт; полный
+    перезапуск даёт `--force`, он же нужен, если сменились настройки этапа
+    (например, `--fps` или `--output-language`). Материалы принимаются по
+    подписи источника в каталоге `slides/` (путь, размер, mtime и dpi),
+    поэтому правка колоды, замена снимка или смена `--slides-dpi` заставляют
+    подготовить материал заново. Постпроцессинг пропускается, когда HTML и
+    PDF не старше notes.md, и отключается флагом `--skip-render`. В синтез
+    уходят описания только тех картинок, что подготовлены в этом прогоне.
 
     Язык распознавания речи (`--language`) и язык результата
     (`--output-language`) — независимые оси: первый лишь подсказывает whisper
@@ -112,12 +107,12 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
     for directory in (output_dir, cache):
         directory.mkdir(parents=True, exist_ok=True)
 
-    output_language = getattr(args, "output_language", "ru")
-    min_scene_seconds = getattr(args, "min_scene_seconds", 5.0)
+    output_language = args.output_language
+    min_scene_seconds = args.min_scene_seconds
 
     print(f"[{stem}] извлечение кадров...")
     keyframes: list[dict] = []
-    if not args.skip_frames and has_video_stream(input_path):
+    if has_video_stream(input_path):
         frames = extract_frames(input_path, frames_dir, args.fps, force=args.force)
         if args.force or not keyframes_path.exists():
             keyframes = select_keyframes(frames, images_dir, args.fps, args.hash_threshold,
@@ -126,65 +121,50 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
                                       encoding="utf-8")
         else:
             keyframes = json.loads(keyframes_path.read_text(encoding="utf-8"))
-    elif not args.skip_frames:
+    else:
         print(f"[{stem}] кадров нет (аудио без видеопотока)")
 
     slides: list[dict] = []
-    slide_sources = getattr(args, "slides", [])
-    if slide_sources and not getattr(args, "skip_slides", False):
-        print(f"[{stem}] подготовка материалов к лекции: {len(slide_sources)}...")
-        slides = prepare_slides(slide_sources, images_dir, slides_dir,
-                                getattr(args, "slides_dpi", 150), force=args.force)
-    elif slide_sources:
-        print(f"[{stem}] материалы к лекции пропущены (--skip-slides)")
+    if args.slides:
+        print(f"[{stem}] подготовка материалов к лекции: {len(args.slides)}...")
+        slides = prepare_slides(args.slides, images_dir, slides_dir,
+                                args.slides_dpi, force=args.force)
 
     print(f"[{stem}] распознавание речи...")
-    if not args.skip_stt:
-        stt_provider, stt_spec = cfg.resolve("stt", args.stt)
-        run_stt(stt_spec, stt_provider, input_path, args.language, transcript_path, cache,
-                force=args.force)
+    stt_provider, stt_spec = cfg.resolve("stt", args.stt)
+    run_stt(stt_spec, stt_provider, input_path, args.language, transcript_path, cache,
+            force=args.force)
     transcript = _load_json(transcript_path)
 
     descriptions: dict = {}
     slide_descriptions: dict = {}
-    if not args.skip_describe and (keyframes or slides):
+    if keyframes or slides:
         vision_provider, vision_spec = cfg.resolve("vision", args.vision_model)
         if keyframes:
             print(f"[{stem}] описание {len(keyframes)} ключевых кадров...")
             descriptions = describe_keyframes(vision_spec, vision_provider, keyframes, transcript,
                                               images_dir, output_language, descriptions_path,
                                               force=args.force)
-        else:
-            descriptions = _cached_dict(descriptions_path)
         if slides:
             print(f"[{stem}] описание материалов к лекции: {len(slides)}...")
             slide_descriptions = describe_slides(vision_spec, vision_provider, slides, images_dir,
                                                  output_language, slide_descriptions_path,
                                                  force=args.force)
-        else:
-            slide_descriptions = _cached_dict(slide_descriptions_path)
+    # Описания картинок прошлого отбора в синтез не идут: иначе модель вставит
+    # ссылки на чужие файлы, которых на диске нет.
+    descriptions = _filter_by_images(descriptions, {kf["image"] for kf in keyframes})
+    slide_descriptions = _filter_by_images(slide_descriptions,
+                                           {entry["image"] for entry in slides})
+
+    if notes_path.exists() and not args.force:
+        print(f"[{stem}] синтез пропущен: конспект уже есть (--force для пересборки)")
     else:
-        descriptions = _cached_dict(descriptions_path)
-        slide_descriptions = _cached_dict(slide_descriptions_path)
+        print(f"[{stem}] синтез Markdown...")
+        llm_provider, llm_spec = cfg.resolve("llm", args.llm_model)
+        run_synthesize(llm_spec, llm_provider, transcript, descriptions, output_language,
+                       notes_path, images_prefix=images_prefix, slides=slide_descriptions)
 
-    # Описания кадров и страниц прошлого отбора в синтез не идут: иначе модель
-    # вставит ссылки на чужие файлы, которых на диске нет.
-    if keyframes:
-        descriptions = _filter_by_images(descriptions, {kf["image"] for kf in keyframes})
-    if slides:
-        slide_descriptions = _filter_by_images(slide_descriptions,
-                                               {entry["image"] for entry in slides})
-
-    if not args.skip_synthesize:
-        if notes_path.exists() and not args.force:
-            print(f"[{stem}] синтез пропущен: конспект уже есть (--force для пересборки)")
-        else:
-            print(f"[{stem}] синтез Markdown...")
-            llm_provider, llm_spec = cfg.resolve("llm", args.llm_model)
-            run_synthesize(llm_spec, llm_provider, transcript, descriptions, output_language,
-                           notes_path, images_prefix=images_prefix, slides=slide_descriptions)
-
-    if not getattr(args, "skip_render", False) and notes_path.exists():
+    if not args.skip_render and notes_path.exists():
         if args.force or not outputs_up_to_date(notes_path, html_path, pdf_path):
             print(f"[{stem}] постпроцессинг: таблицы, HTML, PDF...")
             render_all(notes_path, html_path, pdf_path, lang=output_language)

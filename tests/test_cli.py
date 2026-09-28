@@ -67,11 +67,9 @@ class TestParser:
         assert args.min_scene_seconds == 5.0
         assert args.output_dir is None
         assert args.force is False
-        assert args.skip_stt is False and args.skip_synthesize is False
         assert args.skip_render is False
         assert args.slides == []
         assert args.slides_dpi == 150
-        assert args.skip_slides is False
         assert args.stt is None and args.vision_model is None and args.llm_model is None
         assert args.config is None
         assert args.flat is False
@@ -87,19 +85,16 @@ class TestParser:
             "--llm-model", "l", "--language", "ru", "--output-language", "en",
             "--fps", "2", "--hash-threshold", "5",
             "--min-scene-seconds", "2",
-            "--output-dir", "out", "--force", "--skip-stt", "--skip-frames",
-            "--skip-describe", "--skip-synthesize", "--skip-render", "--flat",
-            "--slides", "deck.pdf", "--slides-dpi", "300", "--skip-slides",
+            "--output-dir", "out", "--force", "--skip-render", "--flat",
+            "--slides", "deck.pdf", "--slides-dpi", "300",
         ])
         assert args.language == "ru" and args.output_language == "en"
         assert args.fps == 2.0 and args.hash_threshold == 5
         assert args.min_scene_seconds == 2.0
         assert args.skip_render is True
         assert args.stt == "x" and args.output_dir == "out" and args.force is True
-        assert args.skip_describe is True and args.skip_synthesize is True
         assert args.flat is True
         assert args.slides == ["deck.pdf"] and args.slides_dpi == 300
-        assert args.skip_slides is True
 
     def test_slides_flag_accumulates(self) -> None:
         args = build_parser().parse_args(["in.mp4", "--slides", "a.pdf",
@@ -237,7 +232,7 @@ class TestMain:
             return input_path.with_name("notes.md")
 
         monkeypatch.setattr("absorbent.pipeline.process_file", _fake_process)
-        code = main([str(tmp_path), "--skip-stt"])
+        code = main([str(tmp_path), "--skip-render"])
         assert code == 0
         assert processed == ["a.mp4", "b.mkv"]
 

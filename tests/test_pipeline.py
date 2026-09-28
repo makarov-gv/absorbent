@@ -1,4 +1,4 @@
-"""Тесты оркестрации конвейера: порядок этапов, кэш, skip-флаги, force."""
+"""Тесты оркестрации конвейера: порядок этапов, кэш, --force и --skip-render."""
 
 from __future__ import annotations
 
@@ -194,47 +194,18 @@ class TestProcessFile:
         assert fake_stages["calls"] == ["extract", "select:10:5.0", "stt:auto", "describe:ru:1",
                                         "synthesize:ru:1", "render"]
 
-    def test_skip_all_flags(self, tmp_path: Path, cfg, fake_stages: dict, args_namespace) -> None:
-        args_namespace.skip_stt = True
-        args_namespace.skip_frames = True
-        args_namespace.skip_describe = True
-        args_namespace.skip_synthesize = True
+    def test_deleted_notes_md_rebuilds_synthesis_only(self, tmp_path: Path, cfg, fake_stages: dict,
+                                                      args_namespace) -> None:
+        """Пересборка одного этапа — удаление его артефакта: остальное берёт кэш."""
         input_path = _input(tmp_path)
         notes = process_file(input_path, cfg, args_namespace)
-        assert fake_stages["calls"] == []
-        # Каталог результата и кэш созданы, notes.md отсутствует.
-        assert notes == tmp_path / "Лекция" / "notes.md"
-        assert notes.parent.is_dir()
-        assert not notes.exists()
-
-    def test_skip_stt_still_synthesizes(self, tmp_path: Path, cfg, fake_stages: dict,
-                                        args_namespace) -> None:
-        # Первый прогон кэширует transcript.json (синтез отключён), второй —
-        # с --skip-stt: синтез работает по кэшу транскрипта, язык результата
-        # не зависит от STT.
-        args_namespace.skip_synthesize = True
-        input_path = _input(tmp_path)
-        process_file(input_path, cfg, args_namespace)
+        notes.unlink()
         fake_stages["calls"].clear()
-        args_namespace.skip_synthesize = False
-        args_namespace.skip_stt = True
         process_file(input_path, cfg, args_namespace)
-        assert not any(c.startswith("stt:") for c in fake_stages["calls"])
-        assert "describe:ru:1" in fake_stages["calls"]
-        assert "synthesize:ru:1" in fake_stages["calls"]
-
-    def test_skip_frames_with_cached_keyframes(self, tmp_path: Path, cfg, fake_stages: dict,
-                                               args_namespace) -> None:
-        # Второй прогон без извлечения кадров: из этапов остаётся только STT,
-        # остальное берётся из кэша.
-        input_path = _input(tmp_path)
-        process_file(input_path, cfg, args_namespace)
-        fake_stages["calls"].clear()
-        args_namespace.skip_frames = True
-        process_file(input_path, cfg, args_namespace)
-        # Кадры не извлекаются; keyframes.json при этом не читается (skip),
-        # поэтому describe не запускается, а готовые описания берутся из кэша.
-        assert fake_stages["calls"] == ["stt:auto"]
+        # Кадры не отбираются заново (keyframes.json на месте), распознавание и
+        # описание идут по кэшу, синтез и постпроцессинг отрабатывают.
+        assert fake_stages["calls"] == ["extract", "stt:auto", "describe:ru:1",
+                                        "synthesize:ru:1", "render"]
 
     def test_hash_threshold_passed(self, tmp_path: Path, cfg, fake_stages: dict,
                                    args_namespace) -> None:
@@ -277,40 +248,9 @@ class TestHelpers:
         path.write_text('[{"a": 1}]', encoding="utf-8")
         assert _load_json(path) == [{"a": 1}]
 
-    def test_describe_from_list_cache_resets(self, tmp_path: Path, cfg, fake_stages: dict,
-                                             args_namespace) -> None:
-        """Сломанный (списочный) descriptions.json при пустых кадрах -> {}."""
-        import absorbent.pipeline as pipeline_module
-
-        # Перехватываем синтез, чтобы проверить, какие описания туда доехали.
-        seen: dict = {}
-
-        def _synthesize(llm_spec, provider, transcript, descriptions, output_language, out_md,
-                        images_prefix="images/", slides=None):
-            seen["descriptions"] = descriptions
-            out_md.parent.mkdir(parents=True, exist_ok=True)
-            out_md.write_text("x", encoding="utf-8")
-            return out_md
-
-        monkeypatch = pytest.MonkeyPatch()
-        monkeypatch.setattr(pipeline_module, "run_stt", lambda *a, **k: None)  # noqa: E731
-        monkeypatch.setattr(pipeline_module, "run_synthesize", _synthesize)
-        out_dir = tmp_path / "Лекция"
-        cache = out_dir / ".absorbent"
-        cache.mkdir(parents=True)
-        # Кэш кадров пуст, а descriptions.json — список (не словарь) -> сброс в {}.
-        (cache / "descriptions.json").write_text("[]", encoding="utf-8")
-        # skip_frames -> keyframes остаются пустыми; skip_describe=False,
-        # поэтому отрабатывает ветка «кадров нет, читаем кэш описаний».
-        args_namespace.skip_frames = True
-        input_path = _input(tmp_path)
-        process_file(input_path, cfg, args_namespace)
-        assert seen["descriptions"] == {}
-        monkeypatch.undo()
-
-    def test_skip_describe_loads_existing_descriptions(self, tmp_path: Path, cfg,
-                                                       fake_stages: dict, args_namespace) -> None:
-        """--skip-describe: готовые описания читаются из кэша и уходят в синтез."""
+    def test_stale_frame_descriptions_dropped(self, tmp_path: Path, cfg, fake_stages: dict,
+                                              args_namespace) -> None:
+        """Кэш описаний прошлого отбора не доходит до синтеза."""
         import absorbent.pipeline as pipeline_module
 
         seen: dict = {}
@@ -322,21 +262,17 @@ class TestHelpers:
             out_md.write_text("x", encoding="utf-8")
             return out_md
 
+        def _describe_cached(vision_spec, provider, keyframes, transcript, images_dir,
+                             output_language, out_json, force=False):
+            # Как настоящий кэш описаний: отдаёт и кадр прошлого отбора.
+            return {kf["image"]: {"timestamp": kf["timestamp"], "description": "текущий"}
+                    for kf in keyframes} | {
+                "frame_00_00_09.jpg": {"timestamp": "00:00:09", "description": "прошлый отбор"}}
+
         monkeypatch = pytest.MonkeyPatch()
-        monkeypatch.setattr(pipeline_module, "run_stt", lambda *a, **k: None)  # noqa: E731
+        monkeypatch.setattr(pipeline_module, "describe_keyframes", _describe_cached)
         monkeypatch.setattr(pipeline_module, "run_synthesize", _synthesize)
-        out_dir = tmp_path / "Лекция"
-        cache = out_dir / ".absorbent"
-        cache.mkdir(parents=True)
-        # В кэше два описания: кадр текущего отбора и кадр прошлого отбора,
-        # которого в keyframes уже нет; до синтеза доходит только первый.
-        (cache / "descriptions.json").write_text(
-            json.dumps({"frame_00_00_00.jpg": {"timestamp": "00:00:00", "description": "текущий"},
-                        "frame_00_00_09.jpg": {"timestamp": "00:00:09", "description": "прошлый отбор"}}),
-            encoding="utf-8")
-        args_namespace.skip_describe = True
-        input_path = _input(tmp_path)
-        process_file(input_path, cfg, args_namespace)
+        process_file(_input(tmp_path), cfg, args_namespace)
         assert seen["descriptions"] == {
             "frame_00_00_00.jpg": {"timestamp": "00:00:00", "description": "текущий"}}
         monkeypatch.undo()
@@ -414,7 +350,7 @@ class TestFlatMode:
 
 
 class TestSlides:
-    """Этап презентаций: порядок, skip-флаги, отсев чужого кэша, аудиовход."""
+    """Этап презентаций: порядок, отсев чужого кэша, аудиовход."""
 
     def _deck(self, tmp_path: Path, name: str = "deck.pdf") -> Path:
         path = tmp_path / name
@@ -436,14 +372,22 @@ class TestSlides:
         assert (tmp_path / "Лекция" / "images" / "slide_001.png").exists()
         assert (tmp_path / "Лекция" / ".absorbent" / "slide_descriptions.json").exists()
 
-    def test_skip_slides_flag_keeps_slides_out(self, tmp_path: Path, cfg, fake_stages: dict,
-                                               args_namespace, capsys: pytest.CaptureFixture) -> None:
-        args_namespace.slides = [self._deck(tmp_path)]
-        args_namespace.skip_slides = True
-        process_file(_input(tmp_path), cfg, args_namespace)
-        assert "slides" not in fake_stages["calls"]
+    def test_stale_slide_descriptions_do_not_reach_synthesis(self, tmp_path: Path, cfg,
+                                                            fake_stages: dict,
+                                                            args_namespace,
+                                                            capsys: pytest.CaptureFixture) -> None:
+        """Материалы прошлого прогона не всплывают, если слайды не переданы."""
+        fake_stages["video"] = False
+        cache = tmp_path / "lecture" / ".absorbent"
+        cache.mkdir(parents=True)
+        (cache / "slide_descriptions.json").write_text(
+            json.dumps({"slide_001.png": {"page": 1, "source": "/old/deck.pdf",
+                                          "description": "прошлый прогон"}}, ensure_ascii=False),
+            encoding="utf-8")
+        process_file(_input(tmp_path, "lecture.mp3"), cfg, args_namespace)
         assert fake_stages["slides"] == {}
-        assert "материалы к лекции пропущены (--skip-slides)" in capsys.readouterr().out
+        assert "synthesize:ru:0" in fake_stages["calls"]
+        assert "подготовка материалов" not in capsys.readouterr().out
 
     def test_audio_with_slides_has_no_frame_dirs(self, tmp_path: Path, cfg, fake_stages: dict,
                                                  args_namespace) -> None:
@@ -465,21 +409,24 @@ class TestSlides:
         process_file(_input(tmp_path), cfg, args_namespace)
         assert fake_stages["slides_dpi"] == 300
 
-    def test_descriptions_from_cache_filtered_by_current_pages(self, tmp_path: Path, cfg,
-                                                              fake_stages: dict,
-                                                              args_namespace) -> None:
-        """--skip-describe: из кэша берутся описания только текущих страниц."""
+    def test_stale_slide_descriptions_dropped(self, tmp_path: Path, cfg, fake_stages: dict,
+                                              args_namespace) -> None:
+        """Кэш описаний прошлого набора страниц не доходит до синтеза."""
+        import absorbent.pipeline as pipeline_module
+
         deck = self._deck(tmp_path)
         args_namespace.slides = [deck]
-        args_namespace.skip_describe = True
-        cache = tmp_path / "Лекция" / ".absorbent"
-        cache.mkdir(parents=True)
-        (cache / "slide_descriptions.json").write_text(
-            json.dumps({
-                "slide_001.png": {"page": 1, "source": str(deck), "description": "текущая"},
-                "slide_009.png": {"page": 9, "source": str(deck), "description": "прошлый отбор"},
-            }, ensure_ascii=False),
-            encoding="utf-8")
+
+        def _describe_cached(vision_spec, provider, slides, images_dir, output_language, out_json,
+                             force=False):
+            # Как настоящий кэш страниц: отдаёт и страницу прошлого отбора.
+            return {entry["image"]: {"page": entry["page"], "source": entry["source"],
+                                     "description": "текущая"} for entry in slides} | {
+                "slide_009.png": {"page": 9, "source": str(deck), "description": "прошлый отбор"}}
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(pipeline_module, "describe_slides", _describe_cached)
         process_file(_input(tmp_path), cfg, args_namespace)
         assert fake_stages["slides"] == {
             "slide_001.png": {"page": 1, "source": str(deck), "description": "текущая"}}
+        monkeypatch.undo()

@@ -4,7 +4,7 @@ providers:
     api_key_env: DEEPSEEK_API_KEY
   llama-swap:
     base_url: http://127.0.0.1:12434/v1
-    api_key_env: ""            # empty string or missing key -> no Authorization header
+    api_key_env: ""            # пусто -> клиенту уходит заглушка not-needed
   mistral:
     base_url: https://api.mistral.ai/v1
     api_key_env: MISTRAL_API_KEY

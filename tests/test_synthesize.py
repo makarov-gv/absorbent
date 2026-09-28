@@ -164,7 +164,7 @@ class TestRunSynthesize:
         assert "completion_tokens=123" in message
         assert "reasoning_tokens=99" in message
         assert "reasoning_content=18 симв." in message
-        assert "--skip-stt --skip-frames --skip-describe" in message
+        assert "повторите прогон: синтез пойдёт заново" in message
         assert not out.exists()
         assert capsys.readouterr().out.count("повтор запроса") == 1
 

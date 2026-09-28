@@ -203,7 +203,7 @@ def run_synthesize(llm_spec: ModelSpec, provider: Provider, transcript: list[dic
     if not text:
         raise SynthesisError(
             f"модель не вернула текст конспекта ({_empty_answer_details(response)}); "
-            "повторите прогон по кэшу: --skip-stt --skip-frames --skip-describe"
+            "повторите прогон: синтез пойдёт заново, остальные этапы возьмутся из кэша"
         )
     out_md.parent.mkdir(parents=True, exist_ok=True)
     out_md.write_text(text, encoding="utf-8")

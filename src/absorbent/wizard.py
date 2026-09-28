@@ -55,17 +55,6 @@ NUMBER_QUESTIONS: tuple[tuple[str, str, str, float, float, Callable[[str], float
      36, 600, int),
 )
 
-# Этапы, которые можно пропустить: значение флага и его пояснение.
-SKIP_CHOICES: tuple[tuple[str, str], ...] = (
-    ("--skip-stt", "--skip-stt — распознавание речи"),
-    ("--skip-frames", "--skip-frames — кадры видео"),
-    ("--skip-slides", "--skip-slides — презентации и фотографии"),
-    ("--skip-describe", "--skip-describe — описание кадров, слайдов и фотографий"),
-    ("--skip-synthesize", "--skip-synthesize — синтез конспекта"),
-    ("--skip-render", "--skip-render — таблицы, HTML, PDF"),
-)
-
-
 class Console(ABC):
     """Единственная точка диалога с пользователем; в тестах подменяется."""
 
@@ -422,7 +411,7 @@ def _essentials(console: Console, cfg: Config, tokens: list[str]) -> bool:
 
 
 def _advanced(console: Console, cfg: Config, tokens: list[str]) -> bool:
-    """Блок «дополнительно»: языки, модели этапов, числа, --force и --skip-*."""
+    """Блок «дополнительно»: языки, модели этапов, числа, --force и --skip-render."""
     language = console.select("Язык речи", "Подсказка распознавания речи (--language; "
                              "auto — детекция, для двуязычных лекций):",
                              [("auto", "auto"), ("ru", "ru"), ("en", "en")], default="auto")
@@ -445,11 +434,10 @@ def _advanced(console: Console, cfg: Config, tokens: list[str]) -> bool:
     if console.confirm("Пересборка", "Игнорировать кэш и пересобрать все этапы (--force)?",
                        default=False):
         tokens.append("--force")
-    skipped = console.select_many("Пропустить этапы", "Отметьте этапы, которые нужно пропустить:",
-                                  list(SKIP_CHOICES))
-    if skipped is None:
-        return False
-    tokens.extend(skipped)
+    if console.confirm("Постпроцессинг",
+                       "Пропустить постпроцессинг: таблицы, HTML, PDF (--skip-render)?",
+                       default=False):
+        tokens.append("--skip-render")
     return True
 
 
@@ -492,7 +480,7 @@ def run_wizard(cfg: Config, config_path: str | None = None, console: Console | N
             return None
         if console.confirm("Дополнительные параметры",
                            "Настроить fps, пороги, языки и модели распознавания/описания, "
-                           "--force и --skip-*?", default=False) and not _advanced(console, cfg, tokens):
+                           "--force и --skip-render?", default=False) and not _advanced(console, cfg, tokens):
             return None
     except (KeyboardInterrupt, EOFError):
         return None

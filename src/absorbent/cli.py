@@ -75,8 +75,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="разрешение растеризации страниц презентации (по умолчанию 150; "
              "на фотографии не влияет)",
     )
-    parser.add_argument("--skip-slides", action="store_true",
-                        help="пропустить подготовку и описание презентаций и фотографий")
     parser.add_argument(
         "--output-dir",
         metavar="DIR",
@@ -93,10 +91,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="игнорировать кэш промежуточных результатов и перезапустить все этапы",
     )
-    parser.add_argument("--skip-stt", action="store_true", help="пропустить распознавание речи")
-    parser.add_argument("--skip-frames", action="store_true", help="пропустить извлечение и отбор ключевых кадров")
-    parser.add_argument("--skip-describe", action="store_true", help="пропустить описание кадров")
-    parser.add_argument("--skip-synthesize", action="store_true", help="пропустить синтез Markdown")
     parser.add_argument("--skip-render", action="store_true",
                         help="пропустить постпроцессинг: выравнивание таблиц, HTML, PDF")
     return parser

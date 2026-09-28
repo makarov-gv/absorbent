@@ -303,9 +303,10 @@ class TestRunWizard:
         console = ScriptedConsole(
             selects=[str(input_path), "ru", cfg.default_name("llm"), "en",
                      "voxtral-transcribe-2", cfg.default_name("vision")],
-            many=[[], ["--skip-stt", "--skip-describe"]],
+            many=[[]],
             texts=["2", "10", "5", "300"],
-            confirms=[False, True, True, True],  # не плоская, «дополнительно», --force, запуск.
+            # Не плоская, «дополнительно», --force, --skip-render, запуск.
+            confirms=[False, True, True, True, True],
         )
         tokens = run_wizard(cfg, console=console, start_dir=tmp_path)
         assert tokens == [
@@ -317,7 +318,7 @@ class TestRunWizard:
             "--min-scene-seconds", "5.0",
             "--slides-dpi", "300",
             "--force",
-            "--skip-stt", "--skip-describe",
+            "--skip-render",
             str(input_path),
         ]
         # Дефолтная модель описания в команду не попала, а язык конспекта спрошен.
@@ -334,9 +335,9 @@ class TestRunWizard:
         console = ScriptedConsole(
             selects=[str(input_path), "ru", cfg.default_name("llm"), "auto",
                      cfg.default_name("stt"), cfg.default_name("vision")],
-            many=[[], []],
+            many=[[]],
             texts=["1", "10", "5", "150"],
-            confirms=[True, True, False, True],
+            confirms=[True, True, False, False, True],
         )
         tokens = run_wizard(cfg, console=console, start_dir=tmp_path)
         assert tokens == ["--flat", "--output-language", "ru", "--language", "auto",
@@ -385,13 +386,6 @@ class TestRunWizard:
             selects=[str(_media(tmp_path)), "ru", cfg.default_name("llm"), "auto",
                      cfg.default_name("stt"), cfg.default_name("vision")],
             many=[[]], texts=[None], confirms=[True, True])
-        assert run_wizard(cfg, console=console, start_dir=tmp_path) is None
-
-    def test_cancel_at_skip_list(self, tmp_path: Path, cfg) -> None:
-        console = ScriptedConsole(
-            selects=[str(_media(tmp_path)), "ru", cfg.default_name("llm"), "auto",
-                     cfg.default_name("stt"), cfg.default_name("vision")],
-            many=[[], None], texts=["1", "10", "5", "150"], confirms=[True, True, False])
         assert run_wizard(cfg, console=console, start_dir=tmp_path) is None
 
     def test_refusal_at_final_confirmation(self, tmp_path: Path, cfg,
