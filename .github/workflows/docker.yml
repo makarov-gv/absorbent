@@ -1,0 +1,112 @@
+name: Docker
+
+# Сборка и публикация образа Absorbent в Docker Hub.
+#
+# Каждая платформа собирается на родном раннере (amd64 — ubuntu-24.04,
+# arm64 — ubuntu-24.04-arm), без эмуляции через QEMU. Образы публикуются по
+# дайджесту, затем отдельная задача сводит их в один манифест с тегами версии
+# и `latest` (см. AGENTS.md о версионировании).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  IMAGE: ivanmikhnovich/absorbent
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      # Образ весит около 9 ГБ, а на ubuntu-раннере свободно лишь ~14 ГБ:
+      # освобождаем место от предустановленных SDK, иначе сборка не влезет.
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          swap-storage: false
+
+      - name: Версия сборки
+        id: meta
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=edge" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Сборка и публикация по дайджесту
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            GIT_REVISION=${{ github.sha }}
+          outputs: >-
+            type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Сохранить дайджест
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ strategy.job-index }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    runs-on: ubuntu-24.04
+    needs: build
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Свести манифест
+        working-directory: /tmp/digests
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            tags=(-t "${IMAGE}:${GITHUB_REF_NAME#v}" -t "${IMAGE}:latest")
+          else
+            tags=(-t "${IMAGE}:edge")
+          fi
+          docker buildx imagetools create "${tags[@]}" \
+            $(printf "${IMAGE}@sha256:%s " *)
