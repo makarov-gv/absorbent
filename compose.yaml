@@ -1,0 +1,27 @@
+# Запуск Absorbent в контейнере. Подготовка:
+#   mkdir -p data
+#   cp <запись> data/
+#   DEEPSEEK_API_KEY=... docker compose run --rm absorbent data/<запись>
+#
+# Если GPU не нужен, уберите блок `deploy` — образ работает и на CPU
+# (torch сам выбирает устройство).
+services:
+  absorbent:
+    build: .
+    image: ivanmikhnovich/absorbent:dev
+    working_dir: /data
+    environment:
+      - DEEPSEEK_API_KEY
+      - MISTRAL_API_KEY
+    volumes:
+      # Рабочие файлы: записи, колоды, результаты.
+      - ./data:/data
+      # Пользовательская конфигурация важнее штатной из образа.
+      - ${HOME}/.config/absorbent:/root/.config/absorbent:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

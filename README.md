@@ -146,6 +146,69 @@ DejaVu (кириллица) — они нужны только PDF. Таблиц
 колодой не работает, но конвейер без материалов от них не зависит, а
 фотографии доски внешних программ не требуют вовсе.
 
+## Запуск в Docker
+
+Образ самодостаточен: внутри Python 3.14 (Debian trixie), ffmpeg, pandoc с
+движком lualatex и шрифтами DejaVu, poppler (`pdftoppm`), LibreOffice
+(`soffice`) и чекпойнт Whisper turbo (файл ~1.6 ГБ в `/root/.cache/whisper`),
+поэтому первый прогон не скачивает веса. Кроме обращения к API моделей сеть
+образу не нужна.
+
+```bash
+docker build -t absorbent:dev .
+docker run --rm \
+  -v "$PWD:/data" -w /data \
+  -e DEEPSEEK_API_KEY \
+  absorbent:dev lecture.mkv
+```
+
+Входной файл, `--slides` и `--output-dir` отсчитываются от рабочего каталога
+`/data`, поэтому запись и колоду кладут туда томом. Точка входа — `absorbent`;
+рядом доступна команда `absorbent-fmt-tables` (выравнивание таблиц, см.
+«Постпроцессинг»).
+
+### Конфигурация
+
+Образ несёт штатный `config.yaml` в `/root/.config/absorbent/config.yaml`,
+поэтому запускается без настройки. Пользовательская конфигурация перекрывает
+штатную — смонтируйте свой каталог:
+
+```bash
+-v "$HOME/.config/absorbent:/root/.config/absorbent:ro"
+```
+
+Порядок поиска тот же, что при запуске из исходников: путь из `--config`,
+затем `./config.yaml` (в контейнере это `/data/config.yaml`, если он там
+окажется), затем `~/.config/absorbent/config.yaml`.
+
+### GPU
+
+Отдельный CUDA-образ не нужен: библиотеки NVIDIA едут внутри колёс PyTorch.
+Со стороны хоста требуются драйвер NVIDIA, пакет `nvidia-container-toolkit` и
+флаг `--gpus all`:
+
+```bash
+docker run --rm --gpus all ... absorbent:dev lecture.mkv
+```
+
+На Arch Linux toolkit ставится пакетом `nvidia-container-toolkit` и
+настраивается командой
+`sudo nvidia-ctk runtime configure --runtime=docker` (после неё перезапустить
+`docker.service`). Без `--gpus` конвейер работает на CPU: Whisper сам выбирает
+устройство, но распознаёт медленнее.
+
+### docker compose
+
+`compose.yaml` собирает образ, монтирует `./data` в `/data` и
+`$HOME/.config/absorbent` в `/root/.config/absorbent` и открывает GPU:
+
+```bash
+mkdir -p data && cp запись.mkv data/
+DEEPSEEK_API_KEY=... docker compose run --rm absorbent data/запись.mkv
+```
+
+Для прогона без GPU уберите блок `deploy` из `compose.yaml`.
+
 ## Конфигурация
 
 Конфигурация ищется в порядке: путь из `--config` → `./config.yaml` →
