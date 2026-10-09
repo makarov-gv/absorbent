@@ -146,7 +146,7 @@ DejaVu (кириллица) — они нужны только PDF. Таблиц
 колодой не работает, но конвейер без материалов от них не зависит, а
 фотографии доски внешних программ не требуют вовсе.
 
-## Запуск в Docker
+## Установка и запуск в Docker
 
 Образ самодостаточен: внутри Python 3.14 (Debian trixie), ffmpeg, pandoc с
 движком lualatex и шрифтами DejaVu, poppler (`pdftoppm`), LibreOffice
@@ -154,18 +154,36 @@ DejaVu (кириллица) — они нужны только PDF. Таблиц
 поэтому первый прогон не скачивает веса. Кроме обращения к API моделей сеть
 образу не нужна.
 
+### Установка из Docker Hub
+
 ```bash
-docker build -t absorbent:dev .
+docker pull ivanmikhnovich/absorbent
+```
+
+Тег без номера — это `latest`; для воспроизводимости берите версионный тег
+(`ivanmikhnovich/absorbent:0.1.0`) или дайджест. Образ собран под linux/amd64.
+
+### Использование
+
+```bash
 docker run --rm \
   -v "$PWD:/data" -w /data \
   -e DEEPSEEK_API_KEY \
-  absorbent:dev lecture.mkv
+  ivanmikhnovich/absorbent lecture.mkv
 ```
 
 Входной файл, `--slides` и `--output-dir` отсчитываются от рабочего каталога
 `/data`, поэтому запись и колоду кладут туда томом. Точка входа — `absorbent`;
 рядом доступна команда `absorbent-fmt-tables` (выравнивание таблиц, см.
 «Постпроцессинг»).
+
+### Сборка из исходников
+
+```bash
+docker build -t absorbent:dev .
+docker run --rm -v "$PWD:/data" -w /data -e DEEPSEEK_API_KEY \
+  absorbent:dev lecture.mkv
+```
 
 ### Конфигурация
 
@@ -188,7 +206,7 @@ docker run --rm \
 флаг `--gpus all`:
 
 ```bash
-docker run --rm --gpus all ... absorbent:dev lecture.mkv
+docker run --rm --gpus all ... ivanmikhnovich/absorbent lecture.mkv
 ```
 
 На Arch Linux toolkit ставится пакетом `nvidia-container-toolkit` и
