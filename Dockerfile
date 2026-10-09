@@ -22,9 +22,17 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # ---------- рабочий образ ----------
 FROM python:3.14-slim-trixie AS runtime
+
+# Версия и ревизия подставляются на сборке релиза ключом `--build-arg`
+# (см. AGENTS.md: метки OCI должны нести номер версии и git-хеш).
+ARG VERSION=dev
+ARG GIT_REVISION=unknown
 LABEL org.opencontainers.image.title="absorbent" \
       org.opencontainers.image.description="Лекционное видео -> конспект Markdown" \
-      org.opencontainers.image.licenses="GPL-3.0-or-later"
+      org.opencontainers.image.licenses="GPL-3.0-or-later" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${GIT_REVISION}" \
+      org.opencontainers.image.source="https://github.com/ivan-mikhnovich/absorbent"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -55,7 +63,10 @@ RUN mkdir -p /root/.cache/whisper \
       https://openaipublic.azureedge.net/main/whisper/models/aff26ae408abcba5fbf8813c21e62b0941638c5f6eebfb145be0c9839262a19a/large-v3-turbo.pt \
  && echo "aff26ae408abcba5fbf8813c21e62b0941638c5f6eebfb145be0c9839262a19a  $WHISPER_CKPT" | sha256sum -c -
 
-COPY --from=builder /app /app
+# В рабочий слой идут только окружение и код; документация и метаданные пакета
+# нужны лишь на этапе сборки, поэтому их правка не меняет дайджест образа.
+COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder /app/src /app/src
 # Штатная конфигурация образа. Пользовательскую кладут томом поверх:
 # -v ~/.config/absorbent:/root/.config/absorbent:ro
 COPY config.yaml /root/.config/absorbent/config.yaml

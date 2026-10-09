@@ -89,7 +89,10 @@ absorbent                                  # интерактивный маст
 Нужны [uv](https://docs.astral.sh/uv/), `ffmpeg` и `ffprobe` в PATH (пакет
 `ffmpeg` в Arch Linux); сам пакет требует Python 3.13+ (uv поставит его сам).
 CUDA-видеокарта необязательна — нужна только для локального Whisper; без неё
-Whisper работает на CPU медленнее.
+Whisper работает на CPU медленнее. Всё дальнейшее — для Linux; на macOS
+(Apple Silicon) и Windows тот же конвейер проще запускать через готовый образ
+(см. «Установка и запуск в Docker»), где окружение уже собрано под обе
+архитектуры.
 
 ```bash
 git clone git@gitlab.com:murtaught/absorbent.git
@@ -152,7 +155,9 @@ DejaVu (кириллица) — они нужны только PDF. Таблиц
 движком lualatex и шрифтами DejaVu, poppler (`pdftoppm`), LibreOffice
 (`soffice`) и чекпойнт Whisper turbo (файл ~1.6 ГБ в `/root/.cache/whisper`),
 поэтому первый прогон не скачивает веса. Кроме обращения к API моделей сеть
-образу не нужна.
+образу не нужна. Образ собирается под две архитектуры — `linux/amd64` и
+`linux/arm64`, — поэтому распознавание речи идёт нативно и быстро как на
+x86-64 (Linux, Windows), так и на ARM64 (macOS, Apple Silicon).
 
 ### Установка из Docker Hub
 
@@ -161,7 +166,9 @@ docker pull ivanmikhnovich/absorbent
 ```
 
 Тег без номера — это `latest`; для воспроизводимости берите версионный тег
-(`ivanmikhnovich/absorbent:0.1.0`) или дайджест. Образ собран под linux/amd64.
+(например, `ivanmikhnovich/absorbent:0.1.1`) или дайджест. Образ
+многоархитектурный: `linux/amd64` (x86-64, с CUDA для NVIDIA) и `linux/arm64`
+(ARM64, CPU); `docker pull` сам берёт подходящий вариант.
 
 ### Использование
 
@@ -176,6 +183,40 @@ docker run --rm \
 `/data`, поэтому запись и колоду кладут туда томом. Точка входа — `absorbent`;
 рядом доступна команда `absorbent-fmt-tables` (выравнивание таблиц, см.
 «Постпроцессинг»).
+
+### Платформы
+
+Распознавание речи выполняется локально, поэтому скорость определяется
+процессором и доступом к GPU. Один и тот же образ подходит всем трём
+платформам, различаются только запуск и наличие ускорения.
+
+**Linux, x86-64.** NVIDIA-карта ускоряет Whisper через `--gpus all` (нужен
+`nvidia-container-toolkit` на хосте, см. «GPU»); без неё конвейер идёт на CPU:
+
+```bash
+docker run --rm --gpus all -v "$PWD:/data" -w /data \
+  -e DEEPSEEK_API_KEY ivanmikhnovich/absorbent lecture.mkv
+```
+
+**Windows, x86-64.** Docker Desktop с бэкендом WSL2; при карте NVIDIA
+включите поддержку GPU в его настройках, и `--gpus all` заработает как на
+Linux. В PowerShell:
+
+```powershell
+docker run --rm --gpus all -v ${PWD}:/data -w /data `
+  -e DEEPSEEK_API_KEY ivanmikhnovich/absorbent lecture.mkv
+```
+
+Рабочие файлы держите в файловой системе WSL2: bind-mount с NTFS медленнее.
+
+**macOS, Apple Silicon (ARM64).** Контейнер работает нативно, без эмуляции
+x86-64, но GPU контейнеру недоступен, поэтому Whisper считает на CPU — быстрее
+эмуляции в разы, но медленнее NVIDIA:
+
+```bash
+docker run --rm -v "$PWD:/data" -w /data \
+  -e DEEPSEEK_API_KEY ivanmikhnovich/absorbent lecture.mkv
+```
 
 ### Сборка из исходников
 
