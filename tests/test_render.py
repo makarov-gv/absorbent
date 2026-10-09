@@ -1,7 +1,7 @@
-"""Тесты постпроцессинга: извлечение title, вызовы fmt-md-tables/pandoc.
+"""Тесты постпроцессинга: выравнивание таблиц, извлечение title, вызовы pandoc.
 
-Внешние программы (fmt-md-tables, pandoc) подменяются: тесты проверяют
-формирование команд и побочные файлы, а не реальные вызовы.
+Внешняя программа (pandoc) подменяется: тесты проверяют формирование команд
+и побочные файлы, а выравнивание таблиц идёт через встроенный модуль [md_tables].
 """
 
 from __future__ import annotations
@@ -114,21 +114,12 @@ class TestPageCss:
 
 
 class TestFmtTables:
-    def test_calls_external_script(self, tmp_path: Path,
-                                   monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(shutil, "which", _fake_which)
+    def test_aligns_tables_in_place(self, tmp_path: Path) -> None:
         notes = _notes(tmp_path)
-        seen: dict = {}
-
-        def _fake_run(cmd, **kwargs):
-            seen["cmd"] = cmd
-            seen["check"] = kwargs.get("check")
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-
-        monkeypatch.setattr(subprocess, "run", _fake_run)
         fmt_tables(notes)
-        assert seen["cmd"] == ["/usr/bin/fmt-md-tables", "--no-backup", str(notes)]
-        assert seen["check"] is True
+        text = notes.read_text(encoding="utf-8")
+        assert "| A   | B   |" in text
+        assert "|-----|-----|" in text
 
 
 class TestRenderHtml:
@@ -269,8 +260,8 @@ class TestOutputsUpToDate:
 
 
 class TestRenderAll:
-    def test_runs_fmt_then_html_then_pdf(self, tmp_path: Path,
-                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_runs_html_then_pdf(self, tmp_path: Path,
+                                monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(shutil, "which", _fake_which)
         notes = _notes(tmp_path)
         order: list[str] = []
@@ -286,7 +277,7 @@ class TestRenderAll:
         assert html == tmp_path / "notes.html"
         assert pdf == tmp_path / "notes.pdf"
         assert html.exists() and pdf.exists()
-        assert order == ["fmt-md-tables", "pandoc", "pandoc"]
+        assert order == ["pandoc", "pandoc"]
 
     def test_missing_tool_fails_fast(self, tmp_path: Path,
                                      monkeypatch: pytest.MonkeyPatch) -> None:
@@ -314,4 +305,4 @@ class TestRenderAll:
         html, pdf = render_all(notes, tmp_path / "lecture.html", tmp_path / "lecture.pdf")
         assert (html, pdf) == (tmp_path / "lecture.html", tmp_path / "lecture.pdf")
         assert html.exists() and pdf.exists()
-        assert order == ["fmt-md-tables", "pandoc", "pandoc"]
+        assert order == ["pandoc", "pandoc"]

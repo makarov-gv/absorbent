@@ -75,8 +75,8 @@ absorbent                                  # интерактивный маст
    повторной пустоте конвейер останавливается с диагностикой
    (`finish_reason`, расход токенов, длина reasoning) — пустой `notes.md` не
    записывается, HTML и PDF не собираются;
-7. постпроцессинг: таблицы notes.md выравниваются скриптом
-   `fmt-md-tables`, затем pandoc собирает самодостаточный `notes.html`
+7. постпроцессинг: таблицы notes.md выравниваются встроенным модулем
+   `absorbent.md_tables`, затем pandoc собирает самодостаточный `notes.html`
    (CSS-тема github-markdown, формулы MathML) и `notes.pdf` через движок
    lualatex со шрифтами DejaVu.
 
@@ -133,15 +133,13 @@ cp config.yaml ~/.config/absorbent/config.yaml
 `~/.cache/whisper` (для `turbo` — файл `large-v3-turbo.pt` примерно на
 1.6 ГБ).
 
-Для постпроцессинга (этап 7) нужны внешние инструменты: `fmt-md-tables`,
-`pandoc` (сам он собирает `notes.html`, а для `notes.pdf` вызывает движок
-`lualatex`) и шрифты DejaVu (кириллица) — они нужны только PDF.
-`fmt-md-tables` — скрипт автора проекта, в репозиторий не
-входит; absorbent зовёт его как `fmt-md-tables --no-backup <notes.md>` и
-ждёт выравнивания pipe-таблиц в файле на месте с кодом возврата 0, так что
-своя замена должна поддерживать эти аргументы. Если подходящего скрипта нет,
-отключайте постпроцессинг флагом `--skip-render`. `--skip-render` нужен и без
-`pandoc` с `lualatex` — тогда конвейер останавливается на готовом `notes.md`.
+Для постпроцессинга (этап 7) нужен внешний инструмент `pandoc` (сам он
+собирает `notes.html`, а для `notes.pdf` вызывает движок `lualatex`) и шрифты
+DejaVu (кириллица) — они нужны только PDF. Таблицы `notes.md` выравнивает
+встроенный модуль `absorbent.md_tables` (он же доступен как отдельная команда
+`absorbent-fmt-tables`), никаких сторонних программ для этого не требуется.
+Без `pandoc` с `lualatex` отключайте постпроцессинг флагом `--skip-render` —
+тогда конвейер останавливается на готовом `notes.md`.
 
 Для презентаций (этап 3) нужны `pdftoppm` (пакет `poppler`) и — только для
 не-PDF (`*.pptx`, `.odp`, …) — `soffice` (LibreOffice). Без них `--slides` с
@@ -493,7 +491,8 @@ Lecture.images/             # весь подготовленный набор �
 ## Постпроцессинг
 
 После синтеза конвейер автоматически:
-1. выравнивает таблицы `notes.md` внешним скриптом `fmt-md-tables`;
+1. выравнивает таблицы `notes.md` встроенным модулем `absorbent.md_tables`
+   (доступен и как команда `absorbent-fmt-tables`);
 2. собирает самодостаточный `notes.html` через
    `pandoc --standalone --embed-resources` — CSS-тема github-markdown
    (файл в `src/absorbent/assets/github-markdown.css`, лицензия MIT,
@@ -531,7 +530,7 @@ HTML/PDF можно отключить флагом `--skip-render` (напри�
 
 - Код — Python 3.13+, пакет в `src/absorbent/`, каждый этап — отдельный
   модуль (`extract.py`, `dedup.py`, `transcribe.py`, `describe.py`,
-  `slides.py`, `synthesize.py`, `render.py`), оркестрация — в `pipeline.py`,
+  `slides.py`, `synthesize.py`, `render.py`, `md_tables.py`), оркестрация — в `pipeline.py`,
   интерактивный мастер — в `wizard.py`.
 - Соглашения по комментариям и коммитам — в `AGENTS.md`.
 - Отложенные идеи — в `BACKLOG.md`.

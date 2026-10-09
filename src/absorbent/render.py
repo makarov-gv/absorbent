@@ -1,7 +1,7 @@
 """Постпроцессинг готового notes.md: выравнивание таблиц, HTML, PDF.
 
-Вызовы внешних программ (fmt-md-tables, pandoc) через subprocess — скрипты
-не интегрируются в проект, а используются как установленные инструменты.
+Таблицы выравнивает встроенный модуль [md_tables]; внешняя программа только
+одна — pandoc, он собирает HTML и (через lualatex) PDF.
 """
 
 from __future__ import annotations
@@ -12,12 +12,13 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from absorbent.md_tables import DEFAULT_MAX_WIDTH, process_file
+
 # Пути к ресурсам пакета: CSS-шаблон GitHub для HTML-версии конспекта.
 ASSETS_DIR = Path(__file__).parent / "assets"
 GITHUB_CSS = ASSETS_DIR / "github-markdown.css"
 
-# Имена внешних инструментов (ищутся в PATH).
-FMT_TABLES = "fmt-md-tables"
+# Имя внешнего инструмента (ищется в PATH).
 PANDOC = "pandoc"
 
 # Шрифты PDF: DejaVu покрывает кириллицу (как в лабораторных отчётах HSE).
@@ -149,13 +150,8 @@ def _html_parts(tmp: Path) -> tuple[Path, Path, Path]:
 
 
 def fmt_tables(notes_md: Path) -> None:
-    """Выровнять pipe-таблицы notes.md внешним скриптом fmt-md-tables."""
-    subprocess.run(
-        [_tool(FMT_TABLES), "--no-backup", str(notes_md)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    """Выровнять pipe-таблицы notes.md встроенным модулем [md_tables]."""
+    process_file(notes_md, DEFAULT_MAX_WIDTH, backup_dir=None, quiet=True)
 
 
 def render_html(notes_md: Path, out_html: Path, lang: str = "ru") -> None:
@@ -228,7 +224,7 @@ def render_all(notes_md: Path, out_html: Path | None = None,
                out_pdf: Path | None = None, lang: str = "ru") -> tuple[Path, Path]:
     """Постпроцессинг: выровнять таблицы, собрать HTML и PDF.
 
-    Таблицы notes.md выравниваются in-place скриптом fmt-md-tables.
+    Таблицы notes.md выравниваются in-place модулем [md_tables].
     Пути HTML и PDF по умолчанию — notes.html и notes.pdf рядом с notes.md,
     как в раскладке <имя>/. Плоский режим передаёт <имя>.html и <имя>.pdf:
     относительные ссылки на картинки разрешает --resource-path по каталогу

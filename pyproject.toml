@@ -22,6 +22,7 @@ dependencies = [
 
 [project.scripts]
 absorbent = "absorbent.cli:main"
+absorbent-fmt-tables = "absorbent.md_tables:main"
 
 [build-system]
 requires = ["hatchling"]
