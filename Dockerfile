@@ -12,13 +12,15 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_PYTHON_DOWNLOADS=never
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 WORKDIR /app
-COPY pyproject.toml uv.lock README.md LICENSE ./
+ARG GIT_REVISION
+ENV ABSORBENT_BUILD_COMMIT=${GIT_REVISION}
+COPY pyproject.toml uv.lock README.md LICENSE hatch_build.py ./
 # Сначала только зависимости: слой кэшируется, пока не менялись uv.lock и pyproject.
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project
 COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev
+    uv sync --frozen --no-dev --no-editable
 
 # ---------- рабочий образ ----------
 FROM python:3.14-slim-trixie AS runtime
@@ -63,10 +65,8 @@ RUN mkdir -p /root/.cache/whisper \
       https://openaipublic.azureedge.net/main/whisper/models/aff26ae408abcba5fbf8813c21e62b0941638c5f6eebfb145be0c9839262a19a/large-v3-turbo.pt \
  && echo "aff26ae408abcba5fbf8813c21e62b0941638c5f6eebfb145be0c9839262a19a  $WHISPER_CKPT" | sha256sum -c -
 
-# В рабочий слой идут только окружение и код; документация и метаданные пакета
-# нужны лишь на этапе сборки, поэтому их правка не меняет дайджест образа.
+# В рабочий слой идёт установленное окружение с кодом и сведениями о сборке.
 COPY --from=builder /app/.venv /app/.venv
-COPY --from=builder /app/src /app/src
 # Штатная конфигурация образа. Пользовательскую кладут томом поверх:
 # -v ~/.config/absorbent:/root/.config/absorbent:ro
 COPY config.yaml /root/.config/absorbent/config.yaml

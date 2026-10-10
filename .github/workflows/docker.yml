@@ -45,6 +45,11 @@ jobs:
         id: meta
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            package_version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+            if [[ "${GITHUB_REF_NAME#v}" != "$package_version" ]]; then
+              echo "Тег не совпадает с версией pyproject.toml" >&2
+              exit 1
+            fi
             echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
           else
             echo "version=edge" >> "$GITHUB_OUTPUT"

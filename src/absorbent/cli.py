@@ -8,6 +8,7 @@ from pathlib import Path
 
 from absorbent.config import Config, ConfigError, load_config
 from absorbent.slides import SlidesError, resolve_slide_sources
+from absorbent.version import version_string
 
 # Расширения, обрабатываемые при передаче директории на вход.
 MEDIA_EXTENSIONS: frozenset[str] = frozenset(
@@ -22,6 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Превращает запись лекции (видео/аудио) в структурированный конспект Markdown.",
         epilog="Запуск без аргументов открывает интерактивный мастер.",
     )
+    parser.add_argument("--version", action="version", version=version_string())
     parser.add_argument("input", nargs="?",
                         help="путь к медиафайлу или директории с медиафайлами "
                              "(без аргументов — интерактивный мастер)")

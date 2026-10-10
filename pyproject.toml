@@ -28,6 +28,9 @@ absorbent-fmt-tables = "absorbent.md_tables:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/absorbent"]
 
