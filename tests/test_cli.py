@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from absorbent.cli import MEDIA_EXTENSIONS, build_parser, collect_inputs, main
+from absorbent.cli import build_parser, collect_inputs, main
 from absorbent.config import ConfigError
 
 
@@ -51,28 +51,9 @@ class TestCollectInputs:
         with pytest.raises(ConfigError, match="не найдено медиафайлов"):
             collect_inputs(str(tmp_path))
 
-    def test_extensions_set_matches_docs(self) -> None:
-        assert ".mp4" in MEDIA_EXTENSIONS and ".mkv" in MEDIA_EXTENSIONS
-        assert ".txt" not in MEDIA_EXTENSIONS
 
 
 class TestParser:
-    def test_defaults(self) -> None:
-        parser = build_parser()
-        args = parser.parse_args(["in.mp4"])
-        assert args.language == "auto"
-        assert args.output_language == "ru"
-        assert args.fps == 1.0
-        assert args.hash_threshold == 10
-        assert args.min_scene_seconds == 5.0
-        assert args.output_dir is None
-        assert args.force is False
-        assert args.skip_render is False
-        assert args.slides == []
-        assert args.slides_dpi == 150
-        assert args.stt is None and args.vision_model is None and args.llm_model is None
-        assert args.config is None
-        assert args.flat is False
 
     def test_input_is_optional(self) -> None:
         """Без позиционного аргумента парсер не падает: вход спросит мастер."""

@@ -9,6 +9,7 @@ from pathlib import Path
 from absorbent.config import Config
 from absorbent.dedup import select_keyframes
 from absorbent.describe import describe_keyframes, describe_slides
+from absorbent.events import stage
 from absorbent.extract import extract_frames, has_video_stream
 from absorbent.render import outputs_up_to_date, render_all
 from absorbent.slides import prepare_slides
@@ -112,61 +113,88 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
 
     print(f"[{stem}] извлечение кадров...")
     keyframes: list[dict] = []
-    if has_video_stream(input_path):
-        frames = extract_frames(input_path, frames_dir, args.fps, force=args.force)
-        if args.force or not keyframes_path.exists():
+    with stage("extract_frames") as status:
+        video = has_video_stream(input_path)
+        if video:
+            if not args.force and any(frames_dir.glob("frame_*.jpg")):
+                status.skip()
+            frames = extract_frames(input_path, frames_dir, args.fps, force=args.force)
+        else:
+            status.skip()
+            print(f"[{stem}] кадров нет (аудио без видеопотока)")
+    with stage("select_keyframes") as status:
+        if not video:
+            status.skip()
+        elif args.force or not keyframes_path.exists():
             keyframes = select_keyframes(frames, images_dir, args.fps, args.hash_threshold,
                                          min_scene_seconds)
             keyframes_path.write_text(json.dumps(keyframes, ensure_ascii=False, indent=2),
                                       encoding="utf-8")
         else:
+            status.skip()
             keyframes = json.loads(keyframes_path.read_text(encoding="utf-8"))
-    else:
-        print(f"[{stem}] кадров нет (аудио без видеопотока)")
 
     slides: list[dict] = []
-    if args.slides:
-        print(f"[{stem}] подготовка материалов к лекции: {len(args.slides)}...")
-        slides = prepare_slides(args.slides, images_dir, slides_dir,
-                                args.slides_dpi, force=args.force)
+    with stage("prepare_slides") as status:
+        if args.slides:
+            print(f"[{stem}] подготовка материалов к лекции: {len(args.slides)}...")
+            slides = prepare_slides(args.slides, images_dir, slides_dir,
+                                    args.slides_dpi, force=args.force,
+                                    max_pages=getattr(args, "max_material_pages", None))
+        else:
+            status.skip()
 
     print(f"[{stem}] распознавание речи...")
-    stt_provider, stt_spec = cfg.resolve("stt", args.stt)
-    run_stt(stt_spec, stt_provider, input_path, args.language, transcript_path, cache,
-            force=args.force)
-    transcript = _load_json(transcript_path)
+    with stage("stt"):
+        stt_provider, stt_spec = cfg.resolve("stt", args.stt)
+        run_stt(stt_spec, stt_provider, input_path, args.language, transcript_path, cache,
+                force=args.force)
+        transcript = _load_json(transcript_path)
 
     descriptions: dict = {}
     slide_descriptions: dict = {}
     if keyframes or slides:
         vision_provider, vision_spec = cfg.resolve("vision", args.vision_model)
+    with stage("describe_keyframes") as status:
         if keyframes:
             print(f"[{stem}] описание {len(keyframes)} ключевых кадров...")
             descriptions = describe_keyframes(vision_spec, vision_provider, keyframes, transcript,
                                               images_dir, output_language, descriptions_path,
                                               force=args.force)
+        else:
+            status.skip()
+    with stage("describe_slides") as status:
         if slides:
             print(f"[{stem}] описание материалов к лекции: {len(slides)}...")
             slide_descriptions = describe_slides(vision_spec, vision_provider, slides, images_dir,
                                                  output_language, slide_descriptions_path,
                                                  force=args.force)
+        else:
+            status.skip()
     # Описания картинок прошлого отбора в синтез не идут: иначе модель вставит
     # ссылки на чужие файлы, которых на диске нет.
     descriptions = _filter_by_images(descriptions, {kf["image"] for kf in keyframes})
     slide_descriptions = _filter_by_images(slide_descriptions,
                                            {entry["image"] for entry in slides})
 
-    if notes_path.exists() and not args.force:
-        print(f"[{stem}] синтез пропущен: конспект уже есть (--force для пересборки)")
-    else:
-        print(f"[{stem}] синтез Markdown...")
-        llm_provider, llm_spec = cfg.resolve("llm", args.llm_model)
-        run_synthesize(llm_spec, llm_provider, transcript, descriptions, output_language,
-                       notes_path, images_prefix=images_prefix, slides=slide_descriptions)
+    with stage("synthesize") as status:
+        if notes_path.exists() and not args.force:
+            status.skip()
+            print(f"[{stem}] синтез пропущен: конспект уже есть (--force для пересборки)")
+        else:
+            print(f"[{stem}] синтез Markdown...")
+            llm_provider, llm_spec = cfg.resolve("llm", args.llm_model)
+            run_synthesize(llm_spec, llm_provider, transcript, descriptions, output_language,
+                           notes_path, images_prefix=images_prefix, slides=slide_descriptions)
 
-    if not args.skip_render and notes_path.exists():
-        if args.force or not outputs_up_to_date(notes_path, html_path, pdf_path):
-            print(f"[{stem}] постпроцессинг: таблицы, HTML, PDF...")
-            render_all(notes_path, html_path, pdf_path, lang=output_language)
-        print(f"[{stem}] готово: {notes_path} (+ {html_path.name}, {pdf_path.name})")
+    with stage("render") as status:
+        if not args.skip_render and notes_path.exists():
+            if args.force or not outputs_up_to_date(notes_path, html_path, pdf_path):
+                print(f"[{stem}] постпроцессинг: таблицы, HTML, PDF...")
+                render_all(notes_path, html_path, pdf_path, lang=output_language)
+            else:
+                status.skip()
+            print(f"[{stem}] готово: {notes_path} (+ {html_path.name}, {pdf_path.name})")
+        else:
+            status.skip()
     return notes_path

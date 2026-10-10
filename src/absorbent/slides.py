@@ -9,9 +9,12 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
+
+from absorbent.events import skip_stage
 
 # Расширения файлов презентаций, которые ищутся при передаче каталога.
 SLIDE_EXTENSIONS: frozenset[str] = frozenset(
@@ -134,6 +137,29 @@ def _pdf_of(source: Path, source_dir: Path) -> Path:
     return converted
 
 
+def _pdf_page_count(pdf: Path) -> int:
+    """Посчитать страницы PDF до растеризации с независимым от локали выводом."""
+    try:
+        proc = subprocess.run(
+            [_tool("pdfinfo"), str(pdf)], check=False, capture_output=True, text=True,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except OSError as exc:
+        raise SlidesError(f"не удалось прочитать число страниц {pdf.name}: {exc}") from exc
+    if proc.returncode != 0:
+        raise SlidesError(f"pdfinfo не прочитал {pdf.name}: {proc.stderr.strip()}")
+    for line in proc.stdout.splitlines():
+        if line.startswith("Pages:"):
+            try:
+                count = int(line.partition(":")[2].strip())
+            except ValueError:
+                break
+            if count > 0:
+                return count
+            break
+    raise SlidesError(f"pdfinfo не сообщил корректное число страниц {pdf.name}")
+
+
 def _rasterize(pdf: Path, source_dir: Path, dpi: int) -> list[Path]:
     """Растеризовать PDF в страницы page-NNN.png; страницы по возрастанию номера."""
     proc = subprocess.run(
@@ -160,7 +186,7 @@ def _photo_page(source: Path, source_dir: Path) -> list[Path]:
 
 
 def prepare_slides(sources: list[Path], images_dir: Path, work_dir: Path, dpi: int,
-                   force: bool = False) -> list[dict]:
+                   force: bool = False, *, max_pages: int | None = None) -> list[dict]:
     """Разложить презентации и фотографии в картинки; вернуть записи страниц.
 
     Каждый источник получает подкаталог кэша work_dir/<номер>_<имя_без_расширения>:
@@ -174,6 +200,8 @@ def prepare_slides(sources: list[Path], images_dir: Path, work_dir: Path, dpi: i
     photo_NNN.<расширение>; нумерация сквозная по источникам своего вида, чужие
     slide_* и photo_* из прошлого прогона удаляются (кадры frame_*.jpg не
     трогаются).
+    При max_pages учитываются все страницы, включая кэш и фотографии; колода,
+    превышающая суммарный предел, не растрируется.
 
     Возвращаются записи {"image", "page", "kind", "source", "source_page"} по
     порядку: источник за источником, страница за страницей. kind — KIND_SLIDE
@@ -181,11 +209,15 @@ def prepare_slides(sources: list[Path], images_dir: Path, work_dir: Path, dpi: i
     выбирает промпт, а синтез — подпись и раздел. page — номер внутри своего
     вида (у фотографии всегда 1), source_page — страница внутри источника.
     """
+    if max_pages is not None and (type(max_pages) is not int or max_pages <= 0):
+        raise SlidesError("предел страниц материалов должен быть положительным целым числом")
     images_dir.mkdir(parents=True, exist_ok=True)
     work_dir.mkdir(parents=True, exist_ok=True)
 
     entries: list[dict] = []
     counters = {KIND_SLIDE: 0, KIND_PHOTO: 0}
+    total_pages = 0
+    all_cached = True
     for index, source in enumerate(sources, start=1):
         kind = KIND_PHOTO if source.suffix.lower() in PHOTO_EXTENSIONS else KIND_SLIDE
         source_dir = work_dir / f"{index:02d}_{source.stem}"
@@ -195,12 +227,23 @@ def prepare_slides(sources: list[Path], images_dir: Path, work_dir: Path, dpi: i
                      "mtime": source.stat().st_mtime, "dpi": dpi}
         pages = None if force else _cached_pages(source_dir, signature)
         if pages is None:
+            all_cached = False
             shutil.rmtree(source_dir, ignore_errors=True)
             source_dir.mkdir(parents=True, exist_ok=True)
-            pages = (_photo_page(source, source_dir) if kind == KIND_PHOTO
-                     else _rasterize(_pdf_of(source, source_dir), source_dir, dpi))
+            pdf = None if kind == KIND_PHOTO else _pdf_of(source, source_dir)
+            if max_pages is not None:
+                count = 1 if pdf is None else _pdf_page_count(pdf)
+                if total_pages + count > max_pages:
+                    raise SlidesError(
+                        f"число страниц материалов {total_pages + count} превышает предел {max_pages}")
+            pages = (_photo_page(source, source_dir) if pdf is None
+                     else _rasterize(pdf, source_dir, dpi))
             (source_dir / SIGNATURE_NAME).write_text(
                 json.dumps(signature, ensure_ascii=False, indent=2), encoding="utf-8")
+        total_pages += len(pages)
+        if max_pages is not None and total_pages > max_pages:
+            raise SlidesError(
+                f"число страниц материалов {total_pages} превышает предел {max_pages}")
         print(f"  {source.name}: {len(pages)} страниц")
         for page in pages:
             counters[kind] += 1
@@ -217,4 +260,6 @@ def prepare_slides(sources: list[Path], images_dir: Path, work_dir: Path, dpi: i
         if (stale.is_file() and stale.name not in names
                 and stale.name.startswith((SLIDE_PREFIX, PHOTO_PREFIX))):
             stale.unlink()
+    if all_cached:
+        skip_stage()
     return entries

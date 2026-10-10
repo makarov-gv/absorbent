@@ -7,7 +7,9 @@ import json
 import mimetypes
 from pathlib import Path
 
-from absorbent.config import PLACEHOLDER_API_KEY, ModelSpec, Provider, api_key_from
+from absorbent.api import create_client
+from absorbent.config import ModelSpec, Provider
+from absorbent.events import JournalError, api_call, skip_stage
 from absorbent.slides import KIND_PHOTO, KIND_SLIDE
 
 # Окно транскрипта вокруг кадра, подаваемое модели (в обе стороны, секунды).
@@ -137,9 +139,8 @@ def describe_keyframes(vision_spec: ModelSpec, provider: Provider, keyframes: li
     транскрипта и подписи со слайда модель сохраняет в исходном языке. Уже
     описанные кадры (без force) пропускаются. Ошибка API на кадре не прерывает
     прогон: в описание пишется текст ошибки.
+    Ошибка журнала прерывает прогон и не сохраняется как описание кадра.
     """
-    from openai import OpenAI
-
     descriptions: dict = {}
     if out_json.exists() and not force:
         descriptions = json.loads(out_json.read_text(encoding="utf-8"))
@@ -147,16 +148,20 @@ def describe_keyframes(vision_spec: ModelSpec, provider: Provider, keyframes: li
     prompt_lang = _prompt_language(output_language)
     system_prompt = SYSTEM_PROMPTS[prompt_lang]
 
-    api_key = api_key_from(provider)
-    client = OpenAI(base_url=provider.base_url, api_key=api_key or PLACEHOLDER_API_KEY)
+    client = create_client(provider)
 
     pending = [kf for kf in keyframes if force or kf["image"] not in descriptions]
+    if not pending:
+        skip_stage()
     for kf in pending:
         name = kf["image"]
         image_path = images_dir / name
         try:
-            text = _describe_one(client, vision_spec.api_model, system_prompt, image_path,
-                                 kf["seconds"], kf["timestamp"], transcript)
+            with api_call("describe_keyframes", provider.name, vision_spec.api_model):
+                text = _describe_one(client, vision_spec.api_model, system_prompt, image_path,
+                                     kf["seconds"], kf["timestamp"], transcript)
+        except JournalError:
+            raise
         except Exception as exc:  # ошибка одного кадра не должна ронять весь прогон.
             text = f"(ошибка описания кадра: {exc})"
         descriptions[name] = {"timestamp": kf["timestamp"], "description": text}
@@ -179,9 +184,8 @@ def describe_slides(vision_spec: ModelSpec, provider: Provider, slides: list[dic
     пропускаются, ошибка API на странице не прерывает прогон: в описание
     пишется текст ошибки. Транскрипт лекции не передаётся: ни у страницы, ни у
     снимка нет таймкода, сопоставление делает синтез по содержанию.
+    Ошибка журнала прерывает прогон и не сохраняется как описание материала.
     """
-    from openai import OpenAI
-
     descriptions: dict = {}
     if out_json.exists() and not force:
         descriptions = json.loads(out_json.read_text(encoding="utf-8"))
@@ -190,10 +194,11 @@ def describe_slides(vision_spec: ModelSpec, provider: Provider, slides: list[dic
     slide_prompt = SLIDE_SYSTEM_PROMPTS[language]
     photo_prompt = PHOTO_SYSTEM_PROMPTS[language]
 
-    api_key = api_key_from(provider)
-    client = OpenAI(base_url=provider.base_url, api_key=api_key or PLACEHOLDER_API_KEY)
+    client = create_client(provider)
 
     pending = [entry for entry in slides if force or entry["image"] not in descriptions]
+    if not pending:
+        skip_stage()
     for entry in pending:
         name = entry["image"]
         image_path = images_dir / name
@@ -208,7 +213,10 @@ def describe_slides(vision_spec: ModelSpec, provider: Provider, slides: list[dic
                       f"(файл {source_name}).\n"
                       "Опиши содержимое слайда.")
         try:
-            text = _vision_answer(client, vision_spec.api_model, system_prompt, prompt, image_path)
+            with api_call("describe_slides", provider.name, vision_spec.api_model):
+                text = _vision_answer(client, vision_spec.api_model, system_prompt, prompt, image_path)
+        except JournalError:
+            raise
         except Exception as exc:  # ошибка одной страницы не должна ронять весь прогон.
             text = f"(ошибка описания: {exc})"
         descriptions[name] = {"page": entry["page"], "source": entry["source"],

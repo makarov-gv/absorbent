@@ -53,7 +53,7 @@ def fake_stages(monkeypatch: pytest.MonkeyPatch) -> dict:
         out_json.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         return data
 
-    def _prepare_slides(sources, images_dir, work_dir, dpi, force=False):
+    def _prepare_slides(sources, images_dir, work_dir, dpi, force=False, *, max_pages=None):
         state["calls"].append("slides")
         state["slides_dpi"] = dpi
         images_dir.mkdir(parents=True, exist_ok=True)
@@ -430,3 +430,36 @@ class TestSlides:
         assert fake_stages["slides"] == {
             "slide_001.png": {"page": 1, "source": str(deck), "description": "текущая"}}
         monkeypatch.undo()
+
+
+def test_journal_audio_stage_boundaries(tmp_path: Path, cfg, fake_stages: dict, args_namespace) -> None:
+    from absorbent.events import Journal
+
+    fake_stages["video"] = False
+    path = tmp_path / "events.jsonl"
+    with Journal(path):
+        process_file(_input(tmp_path, "lecture.wav"), cfg, args_namespace)
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    starts = [row["stage"] for row in rows if row["event"] == "stage_start"]
+    ends = [row for row in rows if row["event"] == "stage_end"]
+    assert starts == [row["stage"] for row in ends] == [
+        "extract_frames", "select_keyframes", "prepare_slides", "stt",
+        "describe_keyframes", "describe_slides", "synthesize", "render"]
+    assert {row["stage"]: row["status"] for row in ends} == {
+        "extract_frames": "skipped", "select_keyframes": "skipped", "prepare_slides": "skipped",
+        "stt": "ok", "describe_keyframes": "skipped", "describe_slides": "skipped",
+        "synthesize": "ok", "render": "ok"}
+
+
+def test_journal_cached_frame_selection_synthesis_and_render(tmp_path: Path, cfg, fake_stages: dict, args_namespace) -> None:
+    from absorbent.events import Journal
+
+    input_path = _input(tmp_path)
+    process_file(input_path, cfg, args_namespace)
+    path = tmp_path / "events.jsonl"
+    with Journal(path):
+        process_file(input_path, cfg, args_namespace)
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    ends = {row["stage"]: row["status"] for row in rows if row["event"] == "stage_end"}
+    assert {name: ends[name] for name in ("extract_frames", "select_keyframes", "synthesize", "render")} == {
+        "extract_frames": "skipped", "select_keyframes": "skipped", "synthesize": "skipped", "render": "skipped"}

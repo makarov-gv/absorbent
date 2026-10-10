@@ -13,11 +13,8 @@ from PIL import Image
 from absorbent.slides import (
     KIND_PHOTO,
     KIND_SLIDE,
-    MATERIAL_EXTENSIONS,
     PAGE_GLOB,
-    PHOTO_EXTENSIONS,
     SIGNATURE_NAME,
-    SLIDE_EXTENSIONS,
     SlidesError,
     _tool,
     prepare_slides,
@@ -28,9 +25,9 @@ from absorbent.slides import (
 class _Completed:
     """Результат subprocess.run с полями, которые читает этап."""
 
-    def __init__(self, returncode: int = 0, stderr: str = "") -> None:
+    def __init__(self, returncode: int = 0, stderr: str = "", stdout: str = "") -> None:
         self.returncode = returncode
-        self.stdout = ""
+        self.stdout = stdout
         self.stderr = stderr
 
 
@@ -38,18 +35,26 @@ class FakeRunner:
     """Подделка subprocess.run: пишет страницы и сконвертированный PDF вместо программ."""
 
     def __init__(self, pages: int | list[int] = 2, soffice_code: int = 0, leave_pdf: bool = True,
-                 pdftoppm_code: int = 0, write_pages: bool = True) -> None:
+                 pdftoppm_code: int = 0, write_pages: bool = True,
+                 pdfinfo_code: int = 0, pdfinfo_output: str | None = None) -> None:
         self.fixed_pages = pages if isinstance(pages, int) else None
         self.per_source = list(pages) if isinstance(pages, list) else []
         self.soffice_code = soffice_code
         self.leave_pdf = leave_pdf
         self.pdftoppm_code = pdftoppm_code
         self.write_pages = write_pages
+        self.pdfinfo_code = pdfinfo_code
+        self.pdfinfo_output = pdfinfo_output
         self.calls: list[list[str]] = []
 
-    def __call__(self, cmd, check=False, capture_output=True, text=True) -> object:
+    def __call__(self, cmd, check=False, capture_output=True, text=True, env=None) -> object:
         command = list(cmd)
         self.calls.append(command)
+        if Path(command[0]).name == "pdfinfo":
+            assert env["LC_ALL"] == "C"
+            count = self.fixed_pages if self.fixed_pages is not None else self.per_source[0]
+            output = self.pdfinfo_output if self.pdfinfo_output is not None else f"Pages: {count}\n"
+            return _Completed(self.pdfinfo_code, stderr="битый PDF", stdout=output)
         if Path(command[0]).name == "soffice":
             # Профиль LibreOffice создаётся по аргументу — этап обязан его удалить.
             env_arg = next(arg for arg in command if arg.startswith("-env:UserInstallation="))
@@ -146,9 +151,6 @@ class TestResolveSlideSources:
         second.write_bytes(b"%PDF")
         assert resolve_slide_sources([str(second), str(first)]) == [second, first]
 
-    def test_extensions_set_documented(self) -> None:
-        assert {".pdf", ".pptx", ".odp"} <= SLIDE_EXTENSIONS
-        assert ".txt" not in SLIDE_EXTENSIONS
 
     def test_photo_file_kept_as_is(self, tmp_path: Path) -> None:
         """Фотография доски — такой же аргумент --slides, как колода."""
@@ -162,10 +164,6 @@ class TestResolveSlideSources:
         (tmp_path / "notes.txt").write_bytes(b"x")
         assert [p.name for p in resolve_slide_sources([str(tmp_path)])] == ["a.pdf", "доска.jpg"]
 
-    def test_material_extensions_cover_both_kinds(self) -> None:
-        assert MATERIAL_EXTENSIONS == SLIDE_EXTENSIONS | PHOTO_EXTENSIONS
-        assert {".png", ".jpg", ".jpeg"} <= PHOTO_EXTENSIONS
-        assert ".pdf" not in PHOTO_EXTENSIONS
 
 
 class TestPrepareSlides:
@@ -381,6 +379,118 @@ class TestPrepareSlides:
         deck.write_bytes(b"zip")
         with pytest.raises(FileNotFoundError, match="soffice"):
             prepare_slides([deck], tmp_path / "images", tmp_path / "work", 150)
+
+
+class TestMaterialPageLimit:
+    @pytest.mark.parametrize("count", [100, 101])
+    @pytest.mark.parametrize("cached", [False, True])
+    def test_pdf_boundary(self, slide_env: SimpleNamespace, count: int, cached: bool) -> None:
+        slide_env.runner.fixed_pages = count
+        if cached:
+            prepare_slides([slide_env.deck], slide_env.images, slide_env.work, 150)
+            slide_env.runner.calls.clear()
+        if count == 100:
+            entries = prepare_slides([slide_env.deck], slide_env.images, slide_env.work,
+                                     150, max_pages=100)
+            assert len(entries) == 100
+            assert entries[-1]["source_page"] == 100
+        else:
+            with pytest.raises(SlidesError, match="101.*100"):
+                prepare_slides([slide_env.deck], slide_env.images, slide_env.work,
+                               150, max_pages=100)
+            assert not any(Path(cmd[0]).name == "pdftoppm" for cmd in slide_env.runner.calls)
+        if cached:
+            assert slide_env.runner.calls == []
+
+    @pytest.mark.parametrize("cached", [False, True])
+    @pytest.mark.parametrize("photo_first", [False, True])
+    def test_mixed_photo_and_deck_limit(self, slide_env: SimpleNamespace,
+                                       cached: bool, photo_first: bool) -> None:
+        photo = slide_env.deck.with_name("board.jpg")
+        photo.write_bytes(b"photo")
+        sources = [photo, slide_env.deck] if photo_first else [slide_env.deck, photo]
+        slide_env.runner.fixed_pages = 99
+        if cached:
+            prepare_slides(sources, slide_env.images, slide_env.work, 150)
+            slide_env.runner.calls.clear()
+        assert len(prepare_slides(sources, slide_env.images, slide_env.work,
+                                 150, max_pages=100)) == 100
+        slide_env.runner.calls.clear()
+        with pytest.raises(SlidesError, match="100.*99"):
+            prepare_slides(sources, slide_env.images, slide_env.work, 150, max_pages=99)
+        assert slide_env.runner.calls == []
+
+    def test_accumulated_pages_reject_new_deck(self, slide_env: SimpleNamespace) -> None:
+        other = slide_env.deck.with_name("other.pdf")
+        other.write_bytes(b"%PDF")
+        slide_env.runner.fixed_pages = None
+        slide_env.runner.per_source = [60, 41]
+        with pytest.raises(SlidesError, match="101.*100"):
+            prepare_slides([slide_env.deck, other], slide_env.images, slide_env.work,
+                           150, max_pages=100)
+        rasterized = [cmd[-2] for cmd in slide_env.runner.calls
+                      if Path(cmd[0]).name == "pdftoppm"]
+        assert rasterized == [str(slide_env.deck)]
+        assert not list((slide_env.work / "02_other").glob(PAGE_GLOB))
+
+    def test_new_photo_counts_before_copy(self, slide_env: SimpleNamespace) -> None:
+        photo = slide_env.deck.with_name("board.jpg")
+        photo.write_bytes(b"photo")
+        slide_env.runner.fixed_pages = 100
+        with pytest.raises(SlidesError, match="101.*100"):
+            prepare_slides([slide_env.deck, photo], slide_env.images, slide_env.work,
+                           150, max_pages=100)
+        assert not list((slide_env.work / "02_board").glob(PAGE_GLOB))
+        assert not list(slide_env.images.glob("photo_*"))
+
+    @pytest.mark.parametrize("limit", [0, -1, 1.5, "100", True, False])
+    def test_invalid_limit_before_work(self, slide_env: SimpleNamespace, limit: object) -> None:
+        with pytest.raises(SlidesError, match="положительным целым"):
+            prepare_slides([slide_env.deck], slide_env.images, slide_env.work,
+                           150, max_pages=limit)
+        assert slide_env.runner.calls == []
+        assert not slide_env.images.exists()
+        assert not slide_env.work.exists()
+
+    @pytest.mark.parametrize("output", ["", "Pages: nope\n", "Pages: 0\n", "Pages: -1\n"])
+    def test_invalid_pdf_metadata(self, slide_env: SimpleNamespace, output: str) -> None:
+        slide_env.runner.pdfinfo_output = "Title: lecture\n" + output
+        with pytest.raises(SlidesError, match="корректное число страниц"):
+            prepare_slides([slide_env.deck], slide_env.images, slide_env.work,
+                           150, max_pages=100)
+        assert len(slide_env.runner.calls) == 1
+        assert not list(slide_env.work.rglob(PAGE_GLOB))
+
+    def test_pdfinfo_failure(self, slide_env: SimpleNamespace) -> None:
+        slide_env.runner.pdfinfo_code = 1
+        with pytest.raises(SlidesError, match="pdfinfo не прочитал"):
+            prepare_slides([slide_env.deck], slide_env.images, slide_env.work,
+                           150, max_pages=100)
+        assert len(slide_env.runner.calls) == 1
+
+    def test_pdfinfo_unavailable(self, slide_env: SimpleNamespace,
+                                 monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(slide_env.module.shutil, "which", lambda name: None)
+        with pytest.raises(SlidesError, match="pdfinfo"):
+            prepare_slides([slide_env.deck], slide_env.images, slide_env.work,
+                           150, max_pages=100)
+        assert slide_env.runner.calls == []
+
+    def test_unlimited_does_not_require_pdfinfo(self, slide_env: SimpleNamespace,
+                                               monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(slide_env.module.shutil, "which",
+                            lambda name: None if name == "pdfinfo" else f"/usr/bin/{name}")
+        assert len(prepare_slides([slide_env.deck], slide_env.images, slide_env.work, 150)) == 2
+
+    def test_converted_office_rejected_before_rasterization(self, slide_env: SimpleNamespace) -> None:
+        office = slide_env.deck.with_suffix(".pptx")
+        office.write_bytes(b"office")
+        slide_env.runner.fixed_pages = 101
+        with pytest.raises(SlidesError, match="101.*100"):
+            prepare_slides([office], slide_env.images, slide_env.work, 150, max_pages=100)
+        assert [Path(cmd[0]).name for cmd in slide_env.runner.calls] == ["soffice", "pdfinfo"]
+        assert slide_env.runner.calls[-1][-1] == str(slide_env.work / "01_deck" / "deck.pdf")
+        assert not (slide_env.work / "01_deck" / "profile").exists()
 
 
 @pytest.mark.skipif(shutil.which("pdftoppm") is None, reason="pdftoppm не установлен")

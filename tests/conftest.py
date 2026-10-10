@@ -101,6 +101,11 @@ class _RawResponse:
         self.calls.append(kwargs)
         return self
 
+    @property
+    def http_response(self) -> "_RawResponse":
+        """Буферизованный HTTP-ответ, доступный в OpenAI SDK."""
+        return self
+
     def json(self) -> dict:
         return self.owner.payload
 
@@ -162,11 +167,10 @@ class FakeOpenAI:
 @pytest.fixture
 def fake_openai(monkeypatch: pytest.MonkeyPatch) -> FakeOpenAI:
     """Подменяет openai.OpenAI на FakeOpenAI во всех модулях absorbent."""
-    import sys
+    import openai
 
     FakeOpenAI.reset()
-    fake_module = type("fake_openai_module", (), {"OpenAI": FakeOpenAI})()
-    monkeypatch.setitem(sys.modules, "openai", fake_module)
+    monkeypatch.setattr(openai, "OpenAI", FakeOpenAI)
     return FakeOpenAI()
 
 

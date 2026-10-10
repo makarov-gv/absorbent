@@ -6,7 +6,9 @@ import json
 import subprocess
 from pathlib import Path
 
-from absorbent.config import PLACEHOLDER_API_KEY, ModelSpec, Provider, api_key_from
+from absorbent.api import create_client
+from absorbent.config import ModelSpec, Provider, api_key_from
+from absorbent.events import api_call, skip_stage
 
 # Канонический промежуточный формат — transcript.json:
 # [{"start": float, "end": float, "text": str, "speaker": str | None}, ...]
@@ -76,17 +78,15 @@ def _voxtral_transcribe(spec: ModelSpec, provider: Provider, input_path: Path, l
     ответа соответствуют живой документации Mistral: segments[].{text,start,end,
     speaker_id}. Ошибки API всплывают как STTError.
     """
-    from openai import OpenAI
-
     api_key = api_key_from(provider)
     # Заголовок x-api-key: именно так устроен задокументированный curl-вызов
     # Mistral; Bearer от OpenAI SDK дублируется на тот случай, если
     # OpenAI-совместимая прослойка ожидает именно его.
     extra_headers = {"X-Api-Key": api_key} if api_key else {}
-    client = OpenAI(base_url=provider.base_url, api_key=api_key or PLACEHOLDER_API_KEY)
+    client = create_client(provider)
     _extract_audio(input_path, audio_path)
 
-    with open(audio_path, "rb") as audio_file:
+    with open(audio_path, "rb") as audio_file, api_call("stt", provider.name, spec.api_model):
         # Mistral-специфичные поля уходят через extra_body, а не именованные
         # аргументы: diarize отсутствует в сигнатуре OpenAI SDK, а типизация
         # timestamp_granularities меняется между версиями openai.
@@ -101,7 +101,7 @@ def _voxtral_transcribe(spec: ModelSpec, provider: Provider, input_path: Path, l
                 "language": (None if language == "auto" else language),
             },
         )
-    data = raw.json()
+    data = raw.http_response.json()
 
     segments = []
     for seg in data.get("segments") or []:
@@ -141,6 +141,7 @@ def run_stt(spec: ModelSpec, provider: Provider, input_path: Path, language: str
     work_dir.mkdir(parents=True, exist_ok=True)
     lang_file = work_dir / "language.txt"
     if out_json.exists() and not force:
+        skip_stage()
         if lang_file.exists():
             return lang_file.read_text(encoding="utf-8").strip() or None
         return None

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 from absorbent.config import Config, ConfigError, load_config
+from absorbent.events import Journal, JournalError
 from absorbent.slides import SlidesError, resolve_slide_sources
 from absorbent.version import version_string
 
@@ -14,6 +16,14 @@ from absorbent.version import version_string
 MEDIA_EXTENSIONS: frozenset[str] = frozenset(
     {".mp4", ".mkv", ".webm", ".avi", ".mov", ".mp3", ".wav", ".flac", ".ogg", ".m4a", ".opus"}
 )
+
+
+def _positive_int(raw: str) -> int:
+    """Разобрать положительный предел без молчаливого обрезания материалов."""
+    value = int(raw)
+    if value <= 0:
+        raise argparse.ArgumentTypeError("предел должен быть положительным целым числом")
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -77,6 +87,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="разрешение растеризации страниц презентации (по умолчанию 150; "
              "на фотографии не влияет)",
     )
+    parser.add_argument(
+        "--max-material-pages",
+        type=_positive_int,
+        metavar="N",
+        help="максимальное суммарное число страниц материалов и фотографий",
+    )
+    parser.add_argument("--journal", metavar="PATH",
+                        help="дописать машинный журнал этапов и HTTP-попыток в JSONL")
     parser.add_argument(
         "--output-dir",
         metavar="DIR",
@@ -142,7 +160,11 @@ def main(argv: list[str] | None = None) -> int:
                 return 130
             # Мастер возвращает аргументы командной строки, а не Namespace:
             # проверки choices и значений остаются в одном месте — в парсере.
+            initial_args = args
             args = parser.parse_args(wizard_argv)
+            args.journal = args.journal or initial_args.journal
+            if args.max_material_pages is None:
+                args.max_material_pages = initial_args.max_material_pages
             _validate_models(cfg, args)
         inputs = collect_inputs(args.input)
         args.slides = resolve_slide_sources(args.slides)
@@ -150,16 +172,33 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ошибка: {exc}", file=sys.stderr)
         return 2
 
+    journal = Journal(Path(args.journal)) if args.journal is not None else None
+    if journal is not None:
+        try:
+            journal.open()
+        except JournalError as exc:
+            print(f"ошибка: {exc}", file=sys.stderr)
+            return 2
+
     # Импорт внутри функции: позволяет --help работать без полного конвейера.
     from absorbent.pipeline import process_file
 
     exit_code = 0
-    for input_path in inputs:
-        try:
-            process_file(input_path, cfg, args)
-        except Exception as exc:  # ошибка этапа не должна ронять обработку остальных файлов.
-            print(f"ошибка обработки {input_path}: {exc}", file=sys.stderr)
-            exit_code = 1
+    try:
+        with journal if journal is not None else nullcontext():
+            for input_path in inputs:
+                try:
+                    process_file(input_path, cfg, args)
+                except JournalError:
+                    raise
+                except Exception as exc:  # ошибка этапа не должна ронять обработку остальных файлов.
+                    print(f"ошибка обработки {input_path}: {exc}", file=sys.stderr)
+                    exit_code = 1
+            if journal is not None:
+                journal.exit_code = exit_code
+    except JournalError as exc:
+        print(f"ошибка обработки: {exc}", file=sys.stderr)
+        return 1
     return exit_code
 
 

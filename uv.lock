@@ -7,6 +7,7 @@ name = "absorbent"
 version = "0.1.1"
 source = { editable = "." }
 dependencies = [
+    { name = "httpx2" },
     { name = "imagehash" },
     { name = "numpy" },
     { name = "openai" },
@@ -26,9 +27,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "httpx2", specifier = ">=2.12,<3" },
     { name = "imagehash" },
     { name = "numpy" },
-    { name = "openai", specifier = ">=1.0" },
+    { name = "openai", specifier = ">=3.7,<4" },
     { name = "openai-whisper" },
     { name = "pillow" },
     { name = "prompt-toolkit", specifier = ">=3.0" },

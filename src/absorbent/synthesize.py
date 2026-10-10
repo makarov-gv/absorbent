@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from absorbent.config import PLACEHOLDER_API_KEY, ModelSpec, Provider, api_key_from
+from absorbent.api import create_client
+from absorbent.config import ModelSpec, Provider
+from absorbent.events import api_call
 from absorbent.slides import KIND_PHOTO, KIND_SLIDE
 
 SYSTEM_PROMPTS: dict[str, str] = {
@@ -164,8 +166,6 @@ def run_synthesize(llm_spec: ModelSpec, provider: Provider, transcript: list[dic
     с диагностикой (finish_reason, расход токенов, длина reasoning), чтобы
     конвейер не записал пустой notes.md и не собрал по нему HTML и PDF.
     """
-    from openai import OpenAI
-
     system_prompt = SYSTEM_PROMPTS[_prompt_language(output_language)].format(
         images_prefix=images_prefix)
 
@@ -184,17 +184,17 @@ def run_synthesize(llm_spec: ModelSpec, provider: Provider, transcript: list[dic
     if photos:
         user_message += "\n\nФотографии доски (снимки, сделанные на лекции):\n" + photos
 
-    api_key = api_key_from(provider)
-    client = OpenAI(base_url=provider.base_url, api_key=api_key or PLACEHOLDER_API_KEY)
+    client = create_client(provider)
     text = ""
     for attempt in range(SYNTHESIS_ATTEMPTS):
-        response = client.chat.completions.create(
-            model=llm_spec.api_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
-            ],
-        )
+        with api_call("synthesize", provider.name, llm_spec.api_model):
+            response = client.chat.completions.create(
+                model=llm_spec.api_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message},
+                ],
+            )
         text = _answer_text(response)
         if text:
             break

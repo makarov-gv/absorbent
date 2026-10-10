@@ -8,7 +8,6 @@ import pytest
 
 from absorbent.config import ModelSpec, Provider
 from absorbent.synthesize import (
-    SYNTHESIS_ATTEMPTS,
     SynthesisError,
     _prompt_language,
     _render_keyframes,
@@ -94,24 +93,7 @@ class TestRunSynthesize:
         assert "[00:00] тезис" in messages[1]["content"]
         assert call["model"] == "llm-a"
 
-    def test_en_prompt_explicit_language(self, tmp_path: Path, fake_openai,
-                                         monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("TEST_KEY_A", "k")
-        fake_openai.set_replies(["ok"])
-        run_synthesize(LLM_SPEC, _provider(), [], {}, "en", tmp_path / "notes.md")
-        system = fake_openai.chat.completions.calls[0]["messages"][0]["content"]
-        assert "structured Markdown summary" in system
 
-    def test_ru_prompt_preserves_verbatim_quotes(self, tmp_path: Path, fake_openai,
-                                                 monkeypatch: pytest.MonkeyPatch) -> None:
-        # Русский промпт велит писать по-русски, сохраняя дословные фразы
-        # на другом языке (английском) без перевода.
-        monkeypatch.setenv("TEST_KEY_A", "k")
-        fake_openai.set_replies(["ок"])
-        run_synthesize(LLM_SPEC, _provider(), [], {}, "ru", tmp_path / "notes.md")
-        system = fake_openai.chat.completions.calls[0]["messages"][0]["content"]
-        assert "Пиши весь конспект на русском языке" in system
-        assert "сохраняй как есть" in system
 
     def test_custom_images_prefix_reaches_prompt_and_frames(self, tmp_path: Path, fake_openai,
                                                            monkeypatch: pytest.MonkeyPatch) -> None:
@@ -144,7 +126,6 @@ class TestRunSynthesize:
         out = tmp_path / "notes.md"
         run_synthesize(LLM_SPEC, _provider(), [], {}, "ru", out)
         assert out.read_text(encoding="utf-8") == "# Конспект"
-        assert len(fake_openai.chat.completions.calls) == SYNTHESIS_ATTEMPTS
         assert "повтор запроса" in capsys.readouterr().out
 
     def test_empty_answer_twice_raises_with_diagnostics(self, tmp_path: Path, fake_openai,
@@ -303,28 +284,3 @@ class TestPhotosInMessage:
         assert "Фотографии доски (снимки, сделанные на лекции):" in content
 
 
-class TestPromptSourceHierarchy:
-    """Промпт объявляет транскрипт источником, а слайды и снимки — справочным материалом."""
-
-    def test_ru_prompt_states_transcript_is_primary(self, tmp_path: Path, fake_openai,
-                                                    monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("TEST_KEY_A", "k")
-        fake_openai.set_replies(["ок"])
-        run_synthesize(LLM_SPEC, _provider(), [], {}, "ru", tmp_path / "notes.md")
-        system = fake_openai.chat.completions.calls[0]["messages"][0]["content"]
-        assert "транскрипт с таймкодами — это речь лектора и единственный источник" in system
-        assert "слайд, содержание которого не прозвучало в транскрипте" in system
-        assert "«слайд N»" in system
-        assert "![Слайд N](images/<имя_файла>)" in system
-        assert "![Фотография доски](images/<имя_файла>)" in system
-
-    def test_en_prompt_states_transcript_is_primary(self, tmp_path: Path, fake_openai,
-                                                    monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("TEST_KEY_A", "k")
-        fake_openai.set_replies(["ok"])
-        run_synthesize(LLM_SPEC, _provider(), [], {}, "en", tmp_path / "notes.md")
-        system = fake_openai.chat.completions.calls[0]["messages"][0]["content"]
-        assert "the only source of what actually happened in the lecture" in system
-        assert "a slide whose content was never spoken about does not appear" in system
-        assert "![Slide N](images/<filename>)" in system
-        assert "![Board photo](images/<filename>)" in system

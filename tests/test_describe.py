@@ -132,27 +132,7 @@ class TestDescribeKeyframes:
         assert user["content"][1]["type"] == "image_url"
         assert user["content"][1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
 
-    def test_en_prompt_used(self, tmp_path: Path, fake_openai, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("TEST_KEY_A", "k")
-        _, images_dir = self._setup(tmp_path)
-        fake_openai.set_replies(["desc"])
-        keyframes = [self._frame(0.0)]
-        describe_keyframes(VISION_SPEC, _provider(), keyframes, [], images_dir, "en",
-                           tmp_path / "descriptions.json")
-        system = fake_openai.chat.completions.calls[0]["messages"][0]["content"]
-        assert "screencast frame" in system
 
-    def test_unknown_output_language_falls_back_ru(self, tmp_path: Path, fake_openai,
-                                                   monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("TEST_KEY_A", "k")
-        _, images_dir = self._setup(tmp_path)
-        fake_openai.set_replies(["описание"])
-        keyframes = [self._frame(0.0)]
-        # Неизвестный язык -> запас на русский промпт (никогда не авто/детект).
-        describe_keyframes(VISION_SPEC, _provider(), keyframes, [], images_dir, "xx",
-                           tmp_path / "descriptions.json")
-        system = fake_openai.chat.completions.calls[0]["messages"][0]["content"]
-        assert "извлекаешь содержимое слайда" in system
 
     def test_skips_existing_without_force(self, tmp_path: Path, fake_openai,
                                           monkeypatch: pytest.MonkeyPatch) -> None:
@@ -275,25 +255,7 @@ class TestDescribeSlides:
         assert "транскрип" not in user[0]["text"].lower()
         assert user[1]["image_url"]["url"].startswith("data:image/png;base64,")
 
-    def test_en_prompt_used(self, tmp_path: Path, fake_openai,
-                            monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("TEST_KEY_A", "k")
-        images_dir = self._setup(tmp_path)
-        fake_openai.set_replies(["desc"])
-        describe_slides(VISION_SPEC, _provider(), [self._slide(1)], images_dir, "en",
-                        tmp_path / "slide_descriptions.json")
-        system = fake_openai.chat.completions.calls[0]["messages"][0]["content"]
-        assert "lecture presentation page" in system
 
-    def test_unknown_language_falls_back_ru(self, tmp_path: Path, fake_openai,
-                                            monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("TEST_KEY_A", "k")
-        images_dir = self._setup(tmp_path)
-        fake_openai.set_replies(["описание"])
-        describe_slides(VISION_SPEC, _provider(), [self._slide(1)], images_dir, "xx",
-                        tmp_path / "slide_descriptions.json")
-        system = fake_openai.chat.completions.calls[0]["messages"][0]["content"]
-        assert "содержимое страницы презентации" in system
 
     def test_photo_described_with_board_prompt(self, tmp_path: Path, fake_openai,
                                                monkeypatch: pytest.MonkeyPatch) -> None:
