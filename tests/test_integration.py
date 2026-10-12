@@ -85,7 +85,7 @@ def offline_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args_names
         return "ru"
 
     def _fake_describe(vision_spec, provider, keyframes, transcript, images_dir, output_language,
-                       out_json, force=False):
+                       out_json, force=False, *, batch_size=1, summary=""):
         data = {
             kf["image"]: {"timestamp": kf["timestamp"], "description": f"слайд на {kf['timestamp']}"}
             for kf in keyframes
@@ -94,12 +94,19 @@ def offline_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args_names
         return data
 
     def _fake_describe_slides(vision_spec, provider, slides, images_dir, output_language,
-                              out_json, force=False):
+                              out_json, force=False, *, batch_size=1):
         data = {entry["image"]: {"page": entry["page"], "source": entry["source"],
                                  "kind": entry["kind"],
                                  "description": f"страница {entry['page']}"} for entry in slides}
         out_json.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         return data
+
+    def _fake_summarize(llm_spec, provider, transcript, output_language, out_md,
+                        transcript_path=None, force=False):
+        text = "Выжимка: " + "; ".join(seg["text"] for seg in transcript)
+        out_md.parent.mkdir(parents=True, exist_ok=True)
+        out_md.write_text(text, encoding="utf-8")
+        return text
 
     def _fake_synthesize(llm_spec, provider, transcript, descriptions, output_language, out_md,
                          images_prefix="images/", slides=None):
@@ -118,6 +125,7 @@ def offline_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args_names
         return out_md
 
     monkeypatch.setattr(pipeline_module, "run_stt", _fake_stt)
+    monkeypatch.setattr(pipeline_module, "run_summarize", _fake_summarize)
     monkeypatch.setattr(pipeline_module, "describe_keyframes", _fake_describe)
     monkeypatch.setattr(pipeline_module, "describe_slides", _fake_describe_slides)
     monkeypatch.setattr(pipeline_module, "run_synthesize", _fake_synthesize)

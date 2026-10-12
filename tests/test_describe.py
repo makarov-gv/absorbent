@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -16,7 +17,7 @@ from absorbent.describe import (
     describe_keyframes,
     describe_slides,
 )
-from absorbent.events import Journal, stage
+from absorbent.events import Journal, JournalError, stage
 
 VISION_SPEC = ModelSpec(name="vis", provider="p", default=True)
 
@@ -133,7 +134,112 @@ class TestDescribeKeyframes:
         assert user["content"][1]["type"] == "image_url"
         assert user["content"][1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
 
+    def test_user_message_prepends_summary(self, tmp_path: Path, fake_openai,
+                                           monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        _, images_dir = self._setup(tmp_path)
+        fake_openai.set_replies(["описание"])
+        keyframes = [self._frame(5.0)]
+        transcript = [{"start": 4.0, "end": 4.5, "text": "слова лектора", "speaker": None}]
+        describe_keyframes(VISION_SPEC, _provider(), keyframes, transcript, images_dir, "ru",
+                           tmp_path / "descriptions.json", summary="Тема: пределы.")
+        user = fake_openai.chat.completions.calls[0]["messages"][1]
+        assert user["content"][0]["text"] == (
+            "Выжимка лекции целиком (общий контекст: тема, порядок изложения, термины и "
+            "обозначения; кадр описывай по изображению и речи вокруг него):\n"
+            "Тема: пределы.\n\n"
+            "Кадр на таймкоде 00:00:05.\n"
+            "Фрагмент транскрипта вокруг этого момента:\n[00:04] слова лектора\n\n"
+            "Опиши содержимое кадра."
+        )
 
+    def test_system_prompt_mentions_summary(self, tmp_path: Path, fake_openai,
+                                            monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        _, images_dir = self._setup(tmp_path)
+        fake_openai.set_replies(["описание"])
+        describe_keyframes(VISION_SPEC, _provider(), [self._frame(5.0)], [], images_dir, "ru",
+                           tmp_path / "descriptions.json", summary="Тема.")
+        system = fake_openai.chat.completions.calls[0]["messages"][0]["content"]
+        assert "выжимка всей лекции" in system
+
+    def test_json_order_follows_keyframes_with_batch(self, tmp_path: Path, fake_openai,
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        images_dir = tmp_path / "images"
+        keyframes = [self._frame(0.0), self._frame(5.0), self._frame(10.0)]
+        for kf in keyframes:
+            _make_image(images_dir, kf["image"])
+        fake_openai.set_replies([])  # ответ по умолчанию, без привязки к порядку вызовов.
+        out = tmp_path / "descriptions.json"
+        result = describe_keyframes(VISION_SPEC, _provider(), keyframes, [], images_dir, "ru", out,
+                                    batch_size=3)
+        expected = ["frame_00_00_00.jpg", "frame_00_00_05.jpg", "frame_00_00_10.jpg"]
+        assert list(result) == expected
+        assert list(json.loads(out.read_text(encoding="utf-8"))) == expected
+
+    def test_batch_runs_descriptions_in_parallel(self, tmp_path: Path, fake_openai,
+                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+        # Барьер собирает три одновременных вызова модели: без параллелизма он
+        # падает по таймауту, а ошибка попадает в текст описания.
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        images_dir = tmp_path / "images"
+        keyframes = [self._frame(0.0), self._frame(5.0), self._frame(10.0)]
+        for kf in keyframes:
+            _make_image(images_dir, kf["image"])
+        fake_openai.set_replies([])
+        completions = fake_openai.chat.completions
+        original = completions.create
+        barrier = threading.Barrier(3, timeout=5.0)
+
+        def parallel_create(**kwargs):
+            barrier.wait()
+            return original(**kwargs)
+
+        monkeypatch.setattr(completions, "create", parallel_create)
+        result = describe_keyframes(VISION_SPEC, _provider(), keyframes, [], images_dir, "ru",
+                                    tmp_path / "descriptions.json", batch_size=3)
+        assert len(result) == 3
+        assert all("ошибка" not in entry["description"] for entry in result.values())
+
+    def test_api_error_in_batch_does_not_stop_others(self, tmp_path: Path, fake_openai,
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        images_dir = tmp_path / "images"
+        keyframes = [self._frame(0.0), self._frame(5.0), self._frame(10.0)]
+        for kf in keyframes:
+            _make_image(images_dir, kf["image"])
+        fake_openai.set_replies([])
+        completions = fake_openai.chat.completions
+        original = completions.create
+
+        def flaky(**kwargs):
+            prompt = kwargs["messages"][1]["content"][0]["text"]
+            if "00:00:00" in prompt:
+                raise RuntimeError("network down")
+            return original(**kwargs)
+
+        monkeypatch.setattr(completions, "create", flaky)
+        result = describe_keyframes(VISION_SPEC, _provider(), keyframes, [], images_dir, "ru",
+                                    tmp_path / "descriptions.json", batch_size=3)
+        assert "(ошибка описания кадра: network down)" in result["frame_00_00_00.jpg"]["description"]
+        assert result["frame_00_00_05.jpg"]["description"] == "ответ модели"
+
+    def test_journal_error_aborts_stage(self, tmp_path: Path, fake_openai,
+                                        monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        images_dir = tmp_path / "images"
+        keyframes = [self._frame(0.0), self._frame(5.0)]
+        for kf in keyframes:
+            _make_image(images_dir, kf["image"])
+
+        def boom(*args, **kwargs):
+            raise JournalError("журнал сломан")
+
+        monkeypatch.setattr("absorbent.describe._vision_answer", boom)
+        with pytest.raises(JournalError, match="журнал сломан"):
+            describe_keyframes(VISION_SPEC, _provider(), keyframes, [], images_dir, "ru",
+                               tmp_path / "descriptions.json", batch_size=2)
 
     def test_skips_existing_without_force(self, tmp_path: Path, fake_openai,
                                           monkeypatch: pytest.MonkeyPatch) -> None:
@@ -314,6 +420,29 @@ class TestDescribeProgress:
         assert [row["completed"] for row in rows] == [1, 2]
         assert all(row["total"] == 2 and row["stage"] == "describe_slides" for row in rows)
 
+    def test_keyframes_batch_progress_monotonic_with_cache(self, tmp_path: Path, fake_openai,
+                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+        # Окна из трёх кадров не нарушают порядок прогресса: кэш даёт старт, дальше по одному.
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        monkeypatch.setattr("absorbent.events._PROGRESS_INTERVAL_SECONDS", 0.0)
+        images_dir = tmp_path / "images"
+        keyframes = [self._frame(0), self._frame(5), self._frame(10), self._frame(15)]
+        for kf in keyframes:
+            _make_image(images_dir, kf["image"])
+        out = tmp_path / "descriptions.json"
+        out.write_text(json.dumps({"frame_00_00_00.jpg": {"timestamp": "00:00:00",
+                                                          "description": "старое"}}),
+                       encoding="utf-8")
+        fake_openai.set_replies([])
+        path = tmp_path / "events.jsonl"
+        with Journal(path):
+            with stage("describe_keyframes"):
+                describe_keyframes(VISION_SPEC, _provider(), keyframes, [], images_dir, "ru", out,
+                                   batch_size=3)
+        rows = self._progress(path)
+        assert [row["completed"] for row in rows] == [1, 2, 3, 4]
+        assert all(row["total"] == 4 and row["stage"] == "describe_keyframes" for row in rows)
+
 
 class TestDescribeSlides:
     """Описание страниц презентации: без транскрипта и таймкодов, свой промпт."""
@@ -327,6 +456,21 @@ class TestDescribeSlides:
     def _slide(self, index: int) -> dict:
         return {"image": f"slide_{index:03d}.png", "page": index,
                 "source": "/decks/Лекция 4.pdf", "source_page": index}
+
+    def test_descriptions_written_in_input_order_with_batch(
+            self, tmp_path: Path, fake_openai, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        images_dir = tmp_path / "images"
+        slides = [self._slide(1), self._slide(2), self._slide(3)]
+        for slide in slides:
+            _make_image(images_dir, slide["image"])
+        fake_openai.set_replies([])
+        out = tmp_path / "slide_descriptions.json"
+        result = describe_slides(VISION_SPEC, _provider(), slides, images_dir, "ru", out,
+                                 batch_size=3)
+        expected = ["slide_001.png", "slide_002.png", "slide_003.png"]
+        assert list(result) == expected
+        assert list(json.loads(out.read_text(encoding="utf-8"))) == expected
 
     def test_describes_and_writes_json(self, tmp_path: Path, fake_openai,
                                        monkeypatch: pytest.MonkeyPatch) -> None:
@@ -432,6 +576,19 @@ class TestDescribeSlides:
                                  images_dir, "ru", tmp_path / "slide_descriptions.json")
         assert "(ошибка описания: network down)" in result["slide_001.png"]["description"]
         assert result["slide_002.png"]["description"] == "второй слайд"
+
+    def test_journal_error_aborts_stage(self, tmp_path: Path, fake_openai,
+                                        monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        images_dir = self._setup(tmp_path)
+
+        def boom(*args, **kwargs):
+            raise JournalError("журнал сломан")
+
+        monkeypatch.setattr("absorbent.describe._vision_answer", boom)
+        with pytest.raises(JournalError, match="журнал сломан"):
+            describe_slides(VISION_SPEC, _provider(), [self._slide(1)], images_dir, "ru",
+                            tmp_path / "slide_descriptions.json", batch_size=2)
 
     def test_missing_api_key_raises(self, tmp_path: Path, fake_openai,
                                     monkeypatch: pytest.MonkeyPatch) -> None:

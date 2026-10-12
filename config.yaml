@@ -2,9 +2,15 @@ providers:
   deepseek:
     base_url: https://api.deepseek.com
     api_key_env: DEEPSEEK_API_KEY
+    # Предел параллелизма аккаунта для deepseek-flash — 2500 запросов; 128
+    # берутся как разумное окно описания картинок, а не как предел.
+    batch_size: 128
   llama-swap:
     base_url: http://127.0.0.1:12434/v1
     api_key_env: ""            # пусто -> клиенту уходит заглушка not-needed
+    # Локальная модель живёт на одной видеокарте: параллельные вызовы не
+    # ускоряют её, а лишь делят память, поэтому окно равно единице.
+    batch_size: 1
   mistral:
     base_url: https://api.mistral.ai/v1
     api_key_env: MISTRAL_API_KEY

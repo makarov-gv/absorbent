@@ -74,8 +74,12 @@ def _prompt_language(output_language: str) -> str:
     return output_language if output_language in SYSTEM_PROMPTS else "ru"
 
 
-def _render_transcript(transcript: list[dict]) -> str:
-    """Весь транскрипт строками [MM:SS] text (или маркер недоступности)."""
+def render_transcript(transcript: list[dict]) -> str:
+    """Весь транскрипт строками [MM:SS] text (или маркер недоступности).
+
+    Функция общая для синтеза и выжимки транскрипта: обе подают модели один
+    и тот же полный транскрипт, поэтому рендер живёт рядом с синтезом.
+    """
     if not transcript:
         return "(transcript unavailable)"
     lines = []
@@ -127,9 +131,11 @@ def _answer_text(response: object) -> str:
     return (response.choices[0].message.content or "").strip()
 
 
-def _empty_answer_details(response: object) -> str:
+def empty_answer_details(response: object) -> str:
     """Диагностика пустого ответа: причина остановки, расход токенов и reasoning.
 
+    Функция общая для синтеза и выжимки: обе повторяют запрос при пустом
+    ответе и при повторной пустоте обязаны объяснить сбой в ошибке этапа.
     Ключ reasoning_content есть только у reasoning-моделей и приходит
     необъявленным полем ответа, поэтому читается из model_extra.
     """
@@ -171,7 +177,7 @@ def run_synthesize(llm_spec: ModelSpec, provider: Provider, transcript: list[dic
 
     user_message = (
         "Транскрипт лекции (основной источник; конспект строится по нему):\n"
-        f"{_render_transcript(transcript)}\n\n"
+        f"{render_transcript(transcript)}\n\n"
         "Ключевые кадры записи:\n"
         f"{_render_keyframes(descriptions, images_prefix)}"
     )
@@ -202,7 +208,7 @@ def run_synthesize(llm_spec: ModelSpec, provider: Provider, transcript: list[dic
             print("внимание: модель вернула пустой ответ, повтор запроса")
     if not text:
         raise SynthesisError(
-            f"модель не вернула текст конспекта ({_empty_answer_details(response)}); "
+            f"модель не вернула текст конспекта ({empty_answer_details(response)}); "
             "повторите прогон: синтез пойдёт заново, остальные этапы возьмутся из кэша"
         )
     out_md.parent.mkdir(parents=True, exist_ok=True)

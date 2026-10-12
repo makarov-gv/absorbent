@@ -24,6 +24,9 @@ class ConfigError(Exception):
 # окружения нельзя — тот уехал бы на чужой (например, локальный) сервер.
 PLACEHOLDER_API_KEY = "not-needed"
 
+# Размер батча по умолчанию, если его не задали ни провайдер, ни модель.
+DEFAULT_BATCH_SIZE: int = 1
+
 
 @dataclass
 class Provider:
@@ -32,6 +35,7 @@ class Provider:
     name: str
     base_url: str
     api_key_env: str = ""
+    batch_size: int = DEFAULT_BATCH_SIZE
 
 
 @dataclass
@@ -44,6 +48,8 @@ class ModelSpec:
     whisper_model: str = ""
     model: str = ""
     default: bool = False
+    # None означает «размер батча берётся у провайдера».
+    batch_size: int | None = None
 
     @property
     def api_model(self) -> str:
@@ -88,6 +94,14 @@ class Config:
         return self.providers[spec.provider]
 
 
+def batch_size_for(provider: Provider, spec: ModelSpec) -> int:
+    """Размер батча для модели: её значение перекрывает значение провайдера.
+
+    Если у модели batch_size не задан (None), берётся размер батча провайдера.
+    """
+    return provider.batch_size if spec.batch_size is None else spec.batch_size
+
+
 def api_key_from(provider: Provider) -> str | None:
     """Ключ API провайдера из переменной окружения; None при пустой api_key_env.
 
@@ -102,11 +116,27 @@ def api_key_from(provider: Provider) -> str | None:
     return value
 
 
+def _positive_batch_size(value: object, message: str) -> int:
+    """Проверить размер батча: строго положительное целое, bool целым не считается."""
+    if type(value) is not int or value <= 0:
+        raise ConfigError(message)
+    return value
+
+
 def _parse_model_table(raw: dict, category: str) -> dict[str, ModelSpec]:
     table: dict[str, ModelSpec] = {}
     for name, body in raw.items():
         if not isinstance(body, dict):
             raise ConfigError(f"модель '{name}' в категории '{category}' должна быть словарём")
+        value = body.get("batch_size")
+        batch_size = (
+            None if value is None else
+            _positive_batch_size(
+                value,
+                f"у модели '{name}' в категории '{category}' размер батча"
+                " должен быть положительным целым числом",
+            )
+        )
         table[name] = ModelSpec(
             name=name,
             provider=str(body.get("provider", "")),
@@ -114,6 +144,7 @@ def _parse_model_table(raw: dict, category: str) -> dict[str, ModelSpec]:
             whisper_model=str(body.get("whisper_model", "")),
             model=str(body.get("model", "")),
             default=bool(body.get("default", False)),
+            batch_size=batch_size,
         )
     return table
 
@@ -148,6 +179,13 @@ def load_config(path: str | None) -> Config:
             name=name,
             base_url=str(body.get("base_url", "")),
             api_key_env=str(body.get("api_key_env", "")),
+            batch_size=(
+                DEFAULT_BATCH_SIZE if "batch_size" not in body else
+                _positive_batch_size(
+                    body["batch_size"],
+                    f"у провайдера '{name}' размер батча должен быть положительным целым числом",
+                )
+            ),
         )
 
     return Config(

@@ -51,7 +51,7 @@ class FakeChatCompletions:
     """Подделка chat.completions: возвращает заданные тексты ответов.
 
     finish_reason, usage и reasoning соответствуют реальному ответу: их
-    читает диагностика пустого ответа в synthesize._empty_answer_details().
+    читает диагностика пустого ответа в synthesize.empty_answer_details().
     """
 
     def __init__(self, replies: list[str]) -> None:

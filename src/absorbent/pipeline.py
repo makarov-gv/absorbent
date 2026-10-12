@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from absorbent.config import Config
+from absorbent.config import Config, ModelSpec, Provider, batch_size_for
 from absorbent.dedup import select_keyframes
 from absorbent.describe import describe_keyframes, describe_slides
 from absorbent.events import stage
 from absorbent.extract import extract_frames, has_video_stream
+from absorbent.parallel import start_in_thread
 from absorbent.render import outputs_up_to_date, render_all
 from absorbent.slides import prepare_slides
+from absorbent.summarize import run_summarize
 from absorbent.synthesize import run_synthesize
 from absorbent.transcribe import run_stt
 
@@ -33,6 +37,42 @@ def _filter_by_images(items: dict, images: set[str]) -> dict:
     return {name: entry for name, entry in items.items() if name in images}
 
 
+def _local_provider(provider: Provider) -> bool:
+    """Провайдер на этой же машине: его модель делит видеопамять с whisper."""
+    host = urlsplit(provider.base_url).hostname
+    if host is None:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _may_describe_slides_early(stt_spec: ModelSpec, vision_provider: Provider) -> bool:
+    """Можно ли описывать материалы, пока идёт распознавание речи.
+
+    Облачная vision-модель видеокарту не занимает вовсе, поэтому её вызовы
+    идут параллельно whisper. Локальная поднимает свои веса на той же карте и
+    должна подождать: иначе llama.cpp делит память с уже загруженным whisper.
+    """
+    return not (_local_provider(vision_provider) and stt_spec.backend == "whisper")
+
+
+def _run_stt_stage(stt_spec: ModelSpec, stt_provider: Provider, input_path: Path, language: str,
+                   transcript_path: Path, cache: Path, force: bool) -> str | None:
+    """Распознать речь в отдельном потоке: этап журнала живёт вместе с потоком.
+
+    Свой `stage('stt')` открывается внутри потока, поэтому длительность этапа в
+    журнале — это длительность распознавания, а не всего перекрытия с
+    подготовкой кадров.
+    """
+    with stage("stt"):
+        return run_stt(stt_spec, stt_provider, input_path, language, transcript_path, cache,
+                       force=force)
+
+
 def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Path:
     """Прогнать все этапы конвейера для одного файла; вернуть путь конспекта.
 
@@ -41,13 +81,27 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
     <имя>.json и <имя>.images/ ложатся рядом с медиафайлом, а кэш — в
     <каталог входа>/.absorbent/<имя>/.
 
-    Порядок этапов: извлечение кадров -> отбор ключевых кадров ->
-    подготовка презентаций и фотографий доски -> распознавание речи ->
+    Порядок этапов: распознавание речи идёт одновременно с подготовкой кадров
+    и материалов (извлечение кадров -> отбор ключевых кадров -> растеризация
+    презентаций и копирование фотографий доски), затем выжимка транскрипта ->
     описание кадров и материалов -> синтез Markdown -> постпроцессинг
     (таблицы, HTML, PDF). Вход без видеопотока (аудиофайл) пропускает все
     этапы кадров: остаётся транскрипт и конспект без иллюстраций, а каталогов
     кадров (frames/ и images/) не появляется вовсе — так же ведёт себя прогон
     без `--slides`.
+
+    Параллелизм нужен там, где этапы не зависят друг от друга. Whisper считает
+    минуты, а ffmpeg и pdftoppm — секунды, поэтому распознавание речи уходит в
+    отдельный поток, и ожидание речи не удлиняет прогон. Описание картинок
+    идёт окнами по `batch_size` выбранной модели (значение модели перекрывает
+    значение провайдера, см. `config.batch_size_for`). Материалы не зависят от
+    речи вовсе, поэтому при облачной vision-модели они описываются ещё до
+    конца распознавания; локальная модель этого не делает — её веса поднимаются
+    на карте, занятой whisper (`_may_describe_slides_early`).
+
+    Описание кадров опирается на речь: каждый кадр получает выжимку всей
+    лекции (отдельный вызов LLM, этап `summarize`) и окно транскрипта ±60
+    секунд вокруг своего таймкода.
 
     Материалы к лекции задаются `--slides` (файл или каталог, флаг можно
     повторять): страницы презентации растрируются в `--slides-dpi`, а
@@ -101,6 +155,7 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
     descriptions_path = cache / "descriptions.json"
     slides_dir = cache / "slides"
     slide_descriptions_path = cache / "slide_descriptions.json"
+    summary_path = cache / "summary.md"
     # Конвейер заводит только каталоги результата и кэша: каталоги картинок
     # (frames/ и images/) создают сами этапы кадров и материалов, и только
     # тогда, когда картинки есть, поэтому аудиовход без слайдов не оставляет
@@ -111,8 +166,23 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
     output_language = args.output_language
     min_scene_seconds = args.min_scene_seconds
 
-    print(f"[{stem}] извлечение кадров...")
     keyframes: list[dict] = []
+    slides: list[dict] = []
+    descriptions: dict = {}
+    slide_descriptions: dict = {}
+    slides_described = False
+    vision_provider: Provider | None = None
+    vision_spec: ModelSpec | None = None
+    vision_batch_size = 1
+
+    print(f"[{stem}] распознавание речи...")
+    stt_provider, stt_spec = cfg.resolve("stt", args.stt)
+    # Распознавание речи занимает минуты, а извлечение кадров, их отбор и
+    # растеризация материалов — секунды, поэтому они идут одновременно:
+    # whisper работает в отдельном потоке, а главный поток готовит картинки.
+    stt_future = start_in_thread(_run_stt_stage, stt_spec, stt_provider, input_path,
+                                 args.language, transcript_path, cache, args.force)
+    print(f"[{stem}] извлечение кадров...")
     with stage("extract_frames") as status:
         video = has_video_stream(input_path)
         if video:
@@ -133,44 +203,62 @@ def process_file(input_path: Path, cfg: Config, args: argparse.Namespace) -> Pat
         else:
             status.skip()
             keyframes = json.loads(keyframes_path.read_text(encoding="utf-8"))
-
-    slides: list[dict] = []
     with stage("prepare_slides") as status:
         if args.slides:
             print(f"[{stem}] подготовка материалов к лекции: {len(args.slides)}...")
-            slides = prepare_slides(args.slides, images_dir, slides_dir,
-                                    args.slides_dpi, force=args.force,
+            slides = prepare_slides(args.slides, images_dir, slides_dir, args.slides_dpi,
+                                    force=args.force,
                                     max_pages=getattr(args, "max_material_pages", None))
         else:
             status.skip()
-
-    print(f"[{stem}] распознавание речи...")
-    with stage("stt"):
-        stt_provider, stt_spec = cfg.resolve("stt", args.stt)
-        run_stt(stt_spec, stt_provider, input_path, args.language, transcript_path, cache,
-                force=args.force)
-        transcript = _load_json(transcript_path)
-
-    descriptions: dict = {}
-    slide_descriptions: dict = {}
     if keyframes or slides:
         vision_provider, vision_spec = cfg.resolve("vision", args.vision_model)
+        vision_batch_size = batch_size_for(vision_provider, vision_spec)
+    # Материалы не зависят от речи, поэтому при облачной vision-модели их
+    # описание идёт, пока whisper ещё считает, и распознавание речи перестаёт
+    # быть единственным длинным этапом прогона.
+    if slides and _may_describe_slides_early(stt_spec, vision_provider):
+        print(f"[{stem}] описание материалов к лекции: {len(slides)}...")
+        with stage("describe_slides"):
+            slide_descriptions = describe_slides(vision_spec, vision_provider, slides, images_dir,
+                                                 output_language, slide_descriptions_path,
+                                                 force=args.force, batch_size=vision_batch_size)
+        slides_described = True
+    # Ошибка распознавания всплывает здесь и прекращает прогон: кадры без речи
+    # описывать не по чему.
+    stt_future.result()
+    transcript = _load_json(transcript_path)
+
+    summary = ""
+    with stage("summarize") as status:
+        if transcript:
+            print(f"[{stem}] выжимка транскрипта...")
+            llm_provider, llm_spec = cfg.resolve("llm", args.llm_model)
+            summary = run_summarize(llm_spec, llm_provider, transcript, output_language,
+                                    summary_path, transcript_path=transcript_path,
+                                    force=args.force)
+        else:
+            status.skip()
+            print(f"[{stem}] выжимка транскрипта не нужна: транскрипт пуст")
+
     with stage("describe_keyframes") as status:
         if keyframes:
             print(f"[{stem}] описание {len(keyframes)} ключевых кадров...")
             descriptions = describe_keyframes(vision_spec, vision_provider, keyframes, transcript,
                                               images_dir, output_language, descriptions_path,
-                                              force=args.force)
+                                              force=args.force, batch_size=vision_batch_size,
+                                              summary=summary)
         else:
             status.skip()
-    with stage("describe_slides") as status:
-        if slides:
-            print(f"[{stem}] описание материалов к лекции: {len(slides)}...")
+    if not slides:
+        with stage("describe_slides") as status:
+            status.skip()
+    elif not slides_described:
+        print(f"[{stem}] описание материалов к лекции: {len(slides)}...")
+        with stage("describe_slides"):
             slide_descriptions = describe_slides(vision_spec, vision_provider, slides, images_dir,
                                                  output_language, slide_descriptions_path,
-                                                 force=args.force)
-        else:
-            status.skip()
+                                                 force=args.force, batch_size=vision_batch_size)
     # Описания картинок прошлого отбора в синтез не идут: иначе модель вставит
     # ссылки на чужие файлы, которых на диске нет.
     descriptions = _filter_by_images(descriptions, {kf["image"] for kf in keyframes})

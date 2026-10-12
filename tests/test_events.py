@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
+import threading
 from datetime import datetime
 from pathlib import Path
 from uuid import UUID
@@ -12,6 +14,7 @@ import pytest
 from absorbent.events import (
     Journal,
     JournalError,
+    StageStatus,
     api_call,
     current_journal,
     emit,
@@ -314,3 +317,67 @@ def test_material_stage_skips_only_entirely_cached_sources(tmp_path: Path) -> No
         with stage("prepare_slides"):
             prepare_slides([first, second], tmp_path / "images", tmp_path / "cache", 150)
     assert [row["status"] for row in records(path) if row["event"] == "stage_end"] == ["ok", "skipped", "ok"]
+
+
+def _write_many(journal: Journal, tag: str, count: int) -> None:
+    """Цель потока: записать серию событий в общий журнал."""
+    for index in range(count):
+        journal.write("concurrent", tag=tag, index=index)
+
+
+def test_concurrent_writes_keep_unique_increasing_seq(tmp_path: Path) -> None:
+    """Потоки этапов пишут в один журнал: строки целы, seq уникален и возрастает."""
+    path = tmp_path / "events.jsonl"
+    writers = 4
+    per_writer = 25
+    with Journal(path) as journal:
+        threads = [
+            threading.Thread(target=_write_many, args=(journal, f"w{index}", per_writer))
+            for index in range(writers)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    rows = records(path)
+    assert len(rows) == writers * per_writer + 2  # run_start и run_end.
+    seqs = [row["seq"] for row in rows]
+    assert len(set(seqs)) == len(seqs)
+    assert seqs == list(range(1, len(rows) + 1))
+    assert all(row["run_id"] == rows[0]["run_id"] for row in rows)
+
+
+def test_write_after_close_raises_journal_error(tmp_path: Path) -> None:
+    """Фоновый этап, доживший до закрытия журнала, получает внятную ошибку."""
+    path = tmp_path / "events.jsonl"
+    with Journal(path) as journal:
+        journal.write("first")
+    with pytest.raises(JournalError, match="журнал закрыт"):
+        journal.write("late")
+
+
+def _report_pair(status: StageStatus, unit: str, barrier: threading.Barrier) -> None:
+    """Цель потока: промежуточный отчёт, затем финальный после общей синхронизации."""
+    status.report(unit, 1, 2)
+    barrier.wait()
+    status.report(unit, 2, 2, force=True)
+
+
+def test_stage_report_from_two_threads_keeps_final_events(tmp_path: Path) -> None:
+    """Троттлинг двух потоков не съедает финальные события этапа."""
+    path = tmp_path / "events.jsonl"
+    with Journal(path):
+        with stage("stt") as status:
+            barrier = threading.Barrier(2)
+            context = contextvars.copy_context()
+            threads = [
+                threading.Thread(target=context.copy().run, args=(_report_pair, status, unit, barrier))
+                for unit in ("left", "right")
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+    finals = [row["unit"] for row in records(path)
+              if row["event"] == "stage_progress" and row["completed"] == 2]
+    assert sorted(finals) == ["left", "right"]

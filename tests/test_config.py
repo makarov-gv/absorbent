@@ -6,7 +6,17 @@ from pathlib import Path
 
 import pytest
 
-from absorbent.config import CONFIG_CANDIDATES, Config, ConfigError, ModelSpec, Provider, api_key_from, load_config
+from absorbent.config import (
+    CONFIG_CANDIDATES,
+    DEFAULT_BATCH_SIZE,
+    Config,
+    ConfigError,
+    ModelSpec,
+    Provider,
+    api_key_from,
+    batch_size_for,
+    load_config,
+)
 
 REPO_CONFIG = Path(__file__).resolve().parents[1] / "config.yaml"
 
@@ -174,3 +184,61 @@ class TestDefaultName:
 
     def test_none_for_empty_category(self) -> None:
         assert Config().default_name("vision") is None
+
+
+class TestBatchSize:
+    """Размер батча: значения по умолчанию, приоритет модели и ошибки."""
+
+    def test_provider_default_and_explicit(self, tmp_path: Path) -> None:
+        path = tmp_path / "config.yaml"
+        path.write_text(
+            "providers:\n"
+            "  plain: {base_url: u}\n"
+            "  sized: {base_url: u, batch_size: 4}\n",
+            encoding="utf-8",
+        )
+        cfg = load_config(str(path))
+        assert DEFAULT_BATCH_SIZE == 1
+        assert cfg.providers["plain"].batch_size == DEFAULT_BATCH_SIZE
+        assert cfg.providers["sized"].batch_size == 4
+
+    def test_model_default_null_and_explicit(self, tmp_path: Path) -> None:
+        path = tmp_path / "config.yaml"
+        path.write_text(
+            "providers:\n  p: {base_url: u, batch_size: 2}\n"
+            "llm:\n"
+            "  absent: {provider: p}\n"
+            "  nulled: {provider: p, batch_size: null}\n"
+            "  sized: {provider: p, batch_size: 8}\n",
+            encoding="utf-8",
+        )
+        cfg = load_config(str(path))
+        assert cfg.llm["absent"].batch_size is None
+        assert cfg.llm["nulled"].batch_size is None
+        assert cfg.llm["sized"].batch_size == 8
+
+    def test_model_value_overrides_provider(self) -> None:
+        provider = Provider(name="p", base_url="u", batch_size=5)
+        assert batch_size_for(provider, ModelSpec(name="m", batch_size=9)) == 9
+
+    def test_missing_model_value_falls_back_to_provider(self) -> None:
+        provider = Provider(name="p", base_url="u", batch_size=7)
+        assert batch_size_for(provider, ModelSpec(name="m")) == 7
+
+    @pytest.mark.parametrize("raw", ["0", "-2", '"3"', "true"])
+    def test_provider_batch_rejected(self, tmp_path: Path, raw: str) -> None:
+        path = tmp_path / "config.yaml"
+        path.write_text(f"providers:\n  p: {{base_url: u, batch_size: {raw}}}\n", encoding="utf-8")
+        with pytest.raises(ConfigError) as err:
+            load_config(str(path))
+        assert str(err.value) == "у провайдера 'p' размер батча должен быть положительным целым числом"
+
+    @pytest.mark.parametrize("raw", ["0", "-2", '"3"', "true"])
+    def test_model_batch_rejected(self, tmp_path: Path, raw: str) -> None:
+        path = tmp_path / "config.yaml"
+        path.write_text(f"llm:\n  m: {{provider: p, batch_size: {raw}}}\n", encoding="utf-8")
+        with pytest.raises(ConfigError) as err:
+            load_config(str(path))
+        assert str(err.value) == (
+            "у модели 'm' в категории 'llm' размер батча должен быть положительным целым числом"
+        )

@@ -10,27 +10,38 @@ from pathlib import Path
 from absorbent.api import create_client
 from absorbent.config import ModelSpec, Provider
 from absorbent.events import JournalError, api_call, report_progress, skip_stage
+from absorbent.parallel import run_batches
 from absorbent.slides import KIND_PHOTO, KIND_SLIDE
 
 # Окно транскрипта вокруг кадра, подаваемое модели (в обе стороны, секунды).
 TRANSCRIPT_WINDOW_SECONDS = 60
 
+# Заголовок блока выжимки лекции, открывающего сообщение пользователя по кадру.
+SUMMARY_PREFIX = (
+    "Выжимка лекции целиком (общий контекст: тема, порядок изложения, термины и обозначения; "
+    "кадр описывай по изображению и речи вокруг него):\n"
+)
+
 SYSTEM_PROMPTS: dict[str, str] = {
     "ru": (
         "Ты извлекаешь содержимое слайда из кадра скринкаста лекции. На вход: изображение кадра, "
-        "его таймкод и фрагмент транскрипта вокруг этого момента. Опиши, что показано на "
-        "слайде/экране: суть, ключевые формулы в LaTeX ($...$), схемы и графики, важные термины. "
+        "его таймкод, фрагмент транскрипта вокруг этого момента и краткая выжимка всей лекции. "
+        "Опиши, что показано на слайде/экране: суть, ключевые формулы в LaTeX ($...$), схемы и "
+        "графики, важные термины. Выжимка нужна только для общей связи и терминологии: "
+        "содержимое кадра описывай по изображению и по речи вокруг него, а не по выжимке. "
         "Отвечай на русском языке, но дословные фразы из транскрипта и подписи со слайда "
         "сохраняй в исходном языке. Кратко (2–4 предложения или список), без воды. Верни только "
         "описание."
     ),
     "en": (
         "You extract slide content from a lecture screencast frame. Input: the frame image, its "
-        "timestamp, and the transcript excerpt around that moment. Describe what is shown: the "
-        "point, key formulas in LaTeX ($...$), any diagrams/charts, and important terms. Answer "
-        "in English, but keep verbatim transcript phrases and slide captions in their original "
-        "language. Be concise (2–4 sentences or a bullet list), no filler. Return only the "
-        "description."
+        "timestamp, the transcript excerpt around that moment, and a short summary of the whole "
+        "lecture. Describe what is shown: the point, key formulas in LaTeX ($...$), any "
+        "diagrams/charts, and important terms. The summary is for overall context and terminology "
+        "only: describe the frame by its image and by the speech around it, not by the summary. "
+        "Answer in English, but keep verbatim transcript phrases and slide captions in their "
+        "original language. Be concise (2–4 sentences or a bullet list), no filler. Return only "
+        "the description."
     ),
 }
 
@@ -118,26 +129,75 @@ def _vision_answer(client, model_name: str, system_prompt: str, prompt: str,
 
 
 def _describe_one(client, model_name: str, system_prompt: str, image_path: Path, seconds: float,
-                  timestamp: str, transcript: list[dict]) -> str:
-    """Один вызов vision-модели для кадра; текст ответа."""
+                  timestamp: str, transcript: list[dict], summary: str = "") -> str:
+    """Один вызов vision-модели для кадра; текст ответа.
+
+    При непустой выжимке лекции она идёт первым блоком сообщения пользователя:
+    модель видит общий контекст до описания конкретного кадра.
+    """
     window = _transcript_window(transcript, seconds)
     prompt = (
         f"Кадр на таймкоде {timestamp}.\n"
         f"Фрагмент транскрипта вокруг этого момента:\n{window}\n\n"
         "Опиши содержимое кадра."
     )
+    if summary:
+        prompt = f"{SUMMARY_PREFIX}{summary}\n\n{prompt}"
     return _vision_answer(client, model_name, system_prompt, prompt, image_path)
+
+
+def _describe_keyframe(client, model_name: str, system_prompt: str, images_dir: Path,
+                       transcript: list[dict], summary: str, provider_name: str,
+                       keyframe: dict) -> dict:
+    """Описание одного ключевого кадра: ошибка API — в текст, JournalError — нет."""
+    try:
+        with api_call("describe_keyframes", provider_name, model_name):
+            text = _describe_one(client, model_name, system_prompt, images_dir / keyframe["image"],
+                                 keyframe["seconds"], keyframe["timestamp"], transcript, summary)
+    except JournalError:
+        raise
+    except Exception as exc:  # ошибка одного кадра не должна ронять весь прогон.
+        text = f"(ошибка описания кадра: {exc})"
+    return {"timestamp": keyframe["timestamp"], "description": text}
+
+
+def _describe_slide(client, model_name: str, slide_prompt: str, photo_prompt: str,
+                    images_dir: Path, total: int, provider_name: str, entry: dict) -> dict:
+    """Описание одной страницы или снимка: ошибка API — в текст, JournalError — нет."""
+    source_name = Path(entry["source"]).name
+    if entry.get("kind", KIND_SLIDE) == KIND_PHOTO:
+        system_prompt = photo_prompt
+        prompt = (f"Фотография доски (файл {source_name}), снятая на лекции.\n"
+                  "Опиши содержимое снимка.")
+    else:
+        system_prompt = slide_prompt
+        prompt = (f"Слайд {entry['page']} из {total} (файл {source_name}).\n"
+                  "Опиши содержимое слайда.")
+    try:
+        with api_call("describe_slides", provider_name, model_name):
+            text = _vision_answer(client, model_name, system_prompt, prompt,
+                                  images_dir / entry["image"])
+    except JournalError:
+        raise
+    except Exception as exc:  # ошибка одной страницы не должна ронять весь прогон.
+        text = f"(ошибка описания: {exc})"
+    return {"page": entry["page"], "source": entry["source"],
+            "kind": entry.get("kind", KIND_SLIDE), "description": text}
 
 
 def describe_keyframes(vision_spec: ModelSpec, provider: Provider, keyframes: list[dict],
                        transcript: list[dict], images_dir: Path, output_language: str,
-                       out_json: Path, force: bool = False) -> dict:
+                       out_json: Path, force: bool = False, *, batch_size: int = 1,
+                       summary: str = "") -> dict:
     """Описать каждый ключевой кадр; вернуть и записать descriptions.json.
 
     Формат: {"frame_HH_MM_SS.jpg": {"timestamp": "HH:MM:SS", "description": str}}.
     Язык описания задаётся явно (output_language: ru/en); дословные фразы из
     транскрипта и подписи со слайда модель сохраняет в исходном языке. Уже
-    описанные кадры (без force) пропускаются. Ошибка API на кадре не прерывает
+    описанные кадры (без force) пропускаются. Непустая выжимка лекции (summary)
+    уходит в промпт каждого кадра как общий контекст темы и терминологии.
+    Вызовы идут окнами по batch_size, а результаты собираются в порядке кадров:
+    файл остаётся детерминированным. Ошибка API на кадре не прерывает
     прогон: в описание пишется текст ошибки.
     Ошибка журнала прерывает прогон и не сохраняется как описание кадра.
     """
@@ -159,27 +219,26 @@ def describe_keyframes(vision_spec: ModelSpec, provider: Provider, keyframes: li
     total = len(keyframes)
     done = total - len(pending)
     report_progress("images", done, total, force=True)
-    for kf in pending:
-        name = kf["image"]
-        image_path = images_dir / name
-        try:
-            with api_call("describe_keyframes", provider.name, vision_spec.api_model):
-                text = _describe_one(client, vision_spec.api_model, system_prompt, image_path,
-                                     kf["seconds"], kf["timestamp"], transcript)
-        except JournalError:
-            raise
-        except Exception as exc:  # ошибка одного кадра не должна ронять весь прогон.
-            text = f"(ошибка описания кадра: {exc})"
-        descriptions[name] = {"timestamp": kf["timestamp"], "description": text}
-        out_json.write_text(json.dumps(descriptions, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def worker(kf: dict) -> dict:
+        return _describe_keyframe(client, vision_spec.api_model, system_prompt, images_dir,
+                                  transcript, summary, provider.name, kf)
+
+    def on_result(kf: dict, value: dict) -> None:
+        nonlocal done
+        descriptions[kf["image"]] = value
+        out_json.write_text(json.dumps(descriptions, ensure_ascii=False, indent=2),
+                            encoding="utf-8")
         done += 1
         report_progress("images", done, total, force=done == total)
+
+    run_batches(pending, worker, batch_size, on_result)
     return descriptions
 
 
 def describe_slides(vision_spec: ModelSpec, provider: Provider, slides: list[dict],
                     images_dir: Path, output_language: str, out_json: Path,
-                    force: bool = False) -> dict:
+                    force: bool = False, *, batch_size: int = 1) -> dict:
     """Описать каждую страницу презентации и фотографию доски; записать JSON.
 
     Формат: {"slide_003.png": {"page": 3, "source": "/путь/колода.pdf",
@@ -191,7 +250,8 @@ def describe_slides(vision_spec: ModelSpec, provider: Provider, slides: list[dic
     слайд против рукописной записи. Уже описанные страницы (без force)
     пропускаются, ошибка API на странице не прерывает прогон: в описание
     пишется текст ошибки. Транскрипт лекции не передаётся: ни у страницы, ни у
-    снимка нет таймкода, сопоставление делает синтез по содержанию.
+    снимка нет таймкода, сопоставление делает синтез по содержанию. Вызовы идут
+    окнами по batch_size, результаты собираются в порядке материалов.
     Ошибка журнала прерывает прогон и не сохраняется как описание материала.
     """
     descriptions: dict = {}
@@ -211,29 +271,18 @@ def describe_slides(vision_spec: ModelSpec, provider: Provider, slides: list[dic
     total = len(slides)
     done = total - len(pending)
     report_progress("images", done, total, force=True)
-    for entry in pending:
-        name = entry["image"]
-        image_path = images_dir / name
-        source_name = Path(entry["source"]).name
-        if entry.get("kind", KIND_SLIDE) == KIND_PHOTO:
-            system_prompt = photo_prompt
-            prompt = (f"Фотография доски (файл {source_name}), снятая на лекции.\n"
-                      "Опиши содержимое снимка.")
-        else:
-            system_prompt = slide_prompt
-            prompt = (f"Слайд {entry['page']} из {len(slides)} "
-                      f"(файл {source_name}).\n"
-                      "Опиши содержимое слайда.")
-        try:
-            with api_call("describe_slides", provider.name, vision_spec.api_model):
-                text = _vision_answer(client, vision_spec.api_model, system_prompt, prompt, image_path)
-        except JournalError:
-            raise
-        except Exception as exc:  # ошибка одной страницы не должна ронять весь прогон.
-            text = f"(ошибка описания: {exc})"
-        descriptions[name] = {"page": entry["page"], "source": entry["source"],
-                              "kind": entry.get("kind", KIND_SLIDE), "description": text}
-        out_json.write_text(json.dumps(descriptions, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def worker(entry: dict) -> dict:
+        return _describe_slide(client, vision_spec.api_model, slide_prompt, photo_prompt,
+                               images_dir, total, provider.name, entry)
+
+    def on_result(entry: dict, value: dict) -> None:
+        nonlocal done
+        descriptions[entry["image"]] = value
+        out_json.write_text(json.dumps(descriptions, ensure_ascii=False, indent=2),
+                            encoding="utf-8")
         done += 1
         report_progress("images", done, total, force=done == total)
+
+    run_batches(pending, worker, batch_size, on_result)
     return descriptions

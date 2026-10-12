@@ -13,7 +13,7 @@ from absorbent.synthesize import (
     _render_keyframes,
     _render_photos,
     _render_slides,
-    _render_transcript,
+    render_transcript,
     run_synthesize,
 )
 
@@ -40,11 +40,11 @@ class TestRenderTranscript:
             {"start": 0.0, "end": 1.0, "text": "привет", "speaker": None},
             {"start": 61.0, "end": 65.0, "text": "мир", "speaker": "speaker_1"},
         ]
-        rendered = _render_transcript(transcript)
+        rendered = render_transcript(transcript)
         assert rendered == "[00:00] привет\n[01:01] [speaker_1] мир"
 
     def test_empty_is_unavailable_marker(self) -> None:
-        assert _render_transcript([]) == "(transcript unavailable)"
+        assert render_transcript([]) == "(transcript unavailable)"
 
 
 class TestRenderKeyframes:

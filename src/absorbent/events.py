@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -36,6 +37,9 @@ class Journal:
         self.exit_code = 0
         self._file: TextIO | None = None
         self._failure: JournalError | None = None
+        # Этапы идут параллельно, поэтому счётчик seq и запись строк в файл
+        # защищаются общей блокировкой журнала.
+        self._lock = threading.Lock()
 
     def open(self) -> None:
         """Открыть файл отдельно от начала прогона для ранней диагностики CLI."""
@@ -80,17 +84,22 @@ class Journal:
 
     def write(self, event: str, **fields) -> None:
         """Записать событие; после потери журнала больше не продолжать обработку."""
-        if self._failure is not None:
-            raise self._failure
-        self.seq += 1
-        record = dict(fields, schema_version=1, run_id=self.run_id, seq=self.seq,
-                      event=event, timestamp_utc=datetime.now(timezone.utc).isoformat())
-        try:
-            self._file.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
-            self._file.flush()
-        except OSError as exc:
-            self._failure = JournalError(f"не удалось записать журнал: {exc}")
-            raise self._failure from exc
+        with self._lock:
+            if self._failure is not None:
+                raise self._failure
+            if self._file is None:
+                # Фоновый этап мог дожить до закрытия журнала: ему нужна
+                # понятная ошибка вместо AttributeError на None.
+                raise JournalError("журнал закрыт")
+            self.seq += 1
+            record = dict(fields, schema_version=1, run_id=self.run_id, seq=self.seq,
+                          event=event, timestamp_utc=datetime.now(timezone.utc).isoformat())
+            try:
+                self._file.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
+                self._file.flush()
+            except OSError as exc:
+                self._failure = JournalError(f"не удалось записать журнал: {exc}")
+                raise self._failure from exc
 
 
 def current_journal() -> Journal | None:
@@ -113,6 +122,9 @@ class StageStatus:
         self.status = "ok"
         # Время последнего сообщённого прогресса; троттлинг держит частоту.
         self._progress_at = 0.0
+        # Прогресс этапа может приходить из нескольких потоков сразу,
+        # поэтому проверка и обновление метки времени идут под блокировкой.
+        self._lock = threading.Lock()
 
     def skip(self) -> None:
         self.status = "skipped"
@@ -125,10 +137,11 @@ class StageStatus:
         троттлинга. Значения completed должны быть неубывающими у вызывающего.
         """
         now = time.monotonic()
-        if not force and now - self._progress_at < _PROGRESS_INTERVAL_SECONDS:
-            return
-        self._progress_at = now
-        emit("stage_progress", stage=self.name, unit=unit, completed=completed, total=total)
+        with self._lock:
+            if not force and now - self._progress_at < _PROGRESS_INTERVAL_SECONDS:
+                return
+            self._progress_at = now
+            emit("stage_progress", stage=self.name, unit=unit, completed=completed, total=total)
 
 
 def skip_stage() -> None:

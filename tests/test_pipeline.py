@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+from concurrent.futures import Future
 from pathlib import Path
 
 import pytest
 
-from absorbent.config import load_config
-from absorbent.pipeline import _load_json, process_file
+from absorbent.config import ModelSpec, Provider, load_config
+from absorbent.pipeline import (_load_json, _local_provider, _may_describe_slides_early,
+                                process_file)
 
 
 @pytest.fixture
@@ -19,10 +21,24 @@ def cfg(minimal_config: Path):
 
 @pytest.fixture
 def fake_stages(monkeypatch: pytest.MonkeyPatch) -> dict:
-    """Подменяет функции этапов записывающими заглушками."""
+    """Подменяет функции этапов записывающими заглушками.
+
+    Фоновый поток распознавания подменён синхронным `start_in_thread`: порядок
+    обращений становится детерминированным, а само перекрытие этапов проверяется
+    отдельно (`_may_describe_slides_early`, tests/test_parallel.py).
+    """
     import absorbent.pipeline as pipeline_module
 
     state: dict = {"calls": []}
+
+    def _start_in_thread(function, *args):
+        state["calls"].append("thread")
+        future: Future = Future()
+        try:
+            future.set_result(function(*args))
+        except BaseException as exc:  # ошибка этапа доезжает через Future, как из потока.
+            future.set_exception(exc)
+        return future
 
     def _extract(input_path, frames_dir, fps, force=False):
         state["calls"].append("extract")
@@ -45,9 +61,19 @@ def fake_stages(monkeypatch: pytest.MonkeyPatch) -> dict:
         (work_dir / "language.txt").write_text("ru", encoding="utf-8")
         return "ru"
 
+    def _summarize(llm_spec, provider, transcript, output_language, out_md,
+                   transcript_path=None, force=False):
+        state["calls"].append(f"summarize:{output_language}")
+        state["summary_transcript"] = transcript
+        out_md.parent.mkdir(parents=True, exist_ok=True)
+        out_md.write_text("выжимка лекции", encoding="utf-8")
+        return "выжимка лекции"
+
     def _describe(vision_spec, provider, keyframes, transcript, images_dir, output_language,
-                  out_json, force=False):
+                  out_json, force=False, *, batch_size=1, summary=""):
         state["calls"].append(f"describe:{output_language}:{len(keyframes)}")
+        state["describe_batch"] = batch_size
+        state["describe_summary"] = summary
         data = {kf["image"]: {"timestamp": kf["timestamp"], "description": f"кадр {kf['image']}"}
                 for kf in keyframes}
         out_json.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
@@ -67,8 +93,9 @@ def fake_stages(monkeypatch: pytest.MonkeyPatch) -> dict:
         return entries
 
     def _describe_slides(vision_spec, provider, slides, images_dir, output_language, out_json,
-                         force=False):
+                         force=False, *, batch_size=1):
         state["calls"].append(f"slides:{output_language}:{len(slides)}")
+        state["slides_batch"] = batch_size
         data = {entry["image"]: {"page": entry["page"], "source": entry["source"],
                                  "description": f"слайд {entry['image']}"} for entry in slides}
         out_json.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
@@ -102,6 +129,8 @@ def fake_stages(monkeypatch: pytest.MonkeyPatch) -> dict:
     monkeypatch.setattr(pipeline_module, "extract_frames", _extract)
     monkeypatch.setattr(pipeline_module, "select_keyframes", _select)
     monkeypatch.setattr(pipeline_module, "run_stt", _run_stt)
+    monkeypatch.setattr(pipeline_module, "start_in_thread", _start_in_thread)
+    monkeypatch.setattr(pipeline_module, "run_summarize", _summarize)
     monkeypatch.setattr(pipeline_module, "describe_keyframes", _describe)
     monkeypatch.setattr(pipeline_module, "prepare_slides", _prepare_slides)
     monkeypatch.setattr(pipeline_module, "describe_slides", _describe_slides)
@@ -130,9 +159,12 @@ class TestProcessFile:
         assert (out_dir / ".absorbent" / "frames").is_dir()
         for name in ("keyframes.json", "transcript.json", "descriptions.json"):
             assert (out_dir / ".absorbent" / name).exists()
-        # Порядок этапов: язык речи (auto) и язык результата (ru) независимы.
+        # Порядок этапов: распознавание речи стартует первым (в отдельном
+        # потоке), кадры и материалы готовятся параллельно ему, выжимка
+        # транскрипта идёт после распознавания.
         assert fake_stages["calls"] == [
-            "extract", "select:10:5.0", "stt:auto", "describe:ru:1", "synthesize:ru:1", "render",
+            "thread", "stt:auto", "extract", "select:10:5.0", "summarize:ru",
+            "describe:ru:1", "synthesize:ru:1", "render",
         ]
 
     def test_custom_output_dir_and_languages(self, tmp_path: Path, cfg, fake_stages: dict,
@@ -159,10 +191,11 @@ class TestProcessFile:
         fake_stages["calls"].clear()
         process_file(input_path, cfg, args_namespace)
         # Без force отбор ключевых кадров пропускается (есть keyframes.json),
-        # extract_frames/run_stt/describe вызываются, но возвращают кэш внутри;
-        # синтез и постпроцессинг пропускаются целиком: notes.md на месте, а
-        # HTML и PDF не старше него.
-        assert fake_stages["calls"] == ["extract", "stt:auto", "describe:ru:1"]
+        # extract_frames/run_stt/summarize/describe вызываются, но возвращают
+        # кэш внутри; синтез и постпроцессинг пропускаются целиком: notes.md на
+        # месте, а HTML и PDF не старше него.
+        assert fake_stages["calls"] == ["thread", "stt:auto", "extract", "summarize:ru",
+                                        "describe:ru:1"]
 
     def test_synthesis_from_cache_kept(self, tmp_path: Path, cfg, fake_stages: dict,
                                        args_namespace, capsys: pytest.CaptureFixture) -> None:
@@ -185,14 +218,16 @@ class TestProcessFile:
         os.utime(notes, (stale + 10, stale + 10))
         fake_stages["calls"].clear()
         process_file(input_path, cfg, args_namespace)
-        assert fake_stages["calls"] == ["extract", "stt:auto", "describe:ru:1", "render"]
+        assert fake_stages["calls"] == ["thread", "stt:auto", "extract", "summarize:ru",
+                                        "describe:ru:1", "render"]
 
     def test_force_reruns_all(self, tmp_path: Path, cfg, fake_stages: dict, args_namespace) -> None:
         args_namespace.force = True
         input_path = _input(tmp_path)
         process_file(input_path, cfg, args_namespace)
-        assert fake_stages["calls"] == ["extract", "select:10:5.0", "stt:auto", "describe:ru:1",
-                                        "synthesize:ru:1", "render"]
+        assert fake_stages["calls"] == ["thread", "stt:auto", "extract", "select:10:5.0",
+                                        "summarize:ru", "describe:ru:1", "synthesize:ru:1",
+                                        "render"]
 
     def test_deleted_notes_md_rebuilds_synthesis_only(self, tmp_path: Path, cfg, fake_stages: dict,
                                                       args_namespace) -> None:
@@ -202,10 +237,10 @@ class TestProcessFile:
         notes.unlink()
         fake_stages["calls"].clear()
         process_file(input_path, cfg, args_namespace)
-        # Кадры не отбираются заново (keyframes.json на месте), распознавание и
-        # описание идут по кэшу, синтез и постпроцессинг отрабатывают.
-        assert fake_stages["calls"] == ["extract", "stt:auto", "describe:ru:1",
-                                        "synthesize:ru:1", "render"]
+        # Кадры не отбираются заново (keyframes.json на месте), распознавание,
+        # выжимка и описание идут по кэшу, синтез и постпроцессинг отрабатывают.
+        assert fake_stages["calls"] == ["thread", "stt:auto", "extract", "summarize:ru",
+                                        "describe:ru:1", "synthesize:ru:1", "render"]
 
     def test_hash_threshold_passed(self, tmp_path: Path, cfg, fake_stages: dict,
                                    args_namespace) -> None:
@@ -263,7 +298,7 @@ class TestHelpers:
             return out_md
 
         def _describe_cached(vision_spec, provider, keyframes, transcript, images_dir,
-                             output_language, out_json, force=False):
+                             output_language, out_json, force=False, *, batch_size=1, summary=""):
             # Как настоящий кэш описаний: отдаёт и кадр прошлого отбора.
             return {kf["image"]: {"timestamp": kf["timestamp"], "description": "текущий"}
                     for kf in keyframes} | {
@@ -333,7 +368,8 @@ class TestFlatMode:
         assert "extract" not in fake_stages["calls"]
         assert not any(c.startswith("select") for c in fake_stages["calls"])
         assert not any(c.startswith("describe") for c in fake_stages["calls"])
-        assert fake_stages["calls"] == ["stt:auto", "synthesize:ru:0", "render"]
+        assert fake_stages["calls"] == ["thread", "stt:auto", "summarize:ru",
+                                        "synthesize:ru:0", "render"]
         assert "кадров нет (аудио без видеопотока)" in capsys.readouterr().out
         assert notes.exists()
 
@@ -362,10 +398,12 @@ class TestSlides:
         deck = self._deck(tmp_path)
         args_namespace.slides = [deck]
         process_file(_input(tmp_path), cfg, args_namespace)
-        # Растеризация идёт между отбором кадров и распознаванием речи.
+        # Материалы растеризуются, пока идёт распознавание речи, и описываются
+        # сразу после: облачная vision-модель GPU не занимает, поэтому ждать
+        # whisper ей не нужно.
         assert fake_stages["calls"] == [
-            "extract", "select:10:5.0", "slides", "stt:auto", "describe:ru:1", "slides:ru:1",
-            "synthesize:ru:1", "render",
+            "thread", "stt:auto", "extract", "select:10:5.0", "slides", "slides:ru:1",
+            "summarize:ru", "describe:ru:1", "synthesize:ru:1", "render",
         ]
         # Описания страниц уходят в синтез вместе с описаниями кадров.
         assert set(fake_stages["slides"]) == {"slide_001.png"}
@@ -397,8 +435,8 @@ class TestSlides:
         args_namespace.slides = [deck]
         process_file(_input(tmp_path, "lecture.mp3"), cfg, args_namespace)
         out_dir = tmp_path / "lecture"
-        assert fake_stages["calls"] == ["slides", "stt:auto", "slides:ru:1", "synthesize:ru:0",
-                                        "render"]
+        assert fake_stages["calls"] == ["thread", "stt:auto", "slides", "slides:ru:1",
+                                        "summarize:ru", "synthesize:ru:0", "render"]
         assert (out_dir / "images" / "slide_001.png").exists()
         assert not (out_dir / ".absorbent" / "frames").exists()
 
@@ -418,7 +456,7 @@ class TestSlides:
         args_namespace.slides = [deck]
 
         def _describe_cached(vision_spec, provider, slides, images_dir, output_language, out_json,
-                             force=False):
+                             force=False, *, batch_size=1):
             # Как настоящий кэш страниц: отдаёт и страницу прошлого отбора.
             return {entry["image"]: {"page": entry["page"], "source": entry["source"],
                                      "description": "текущая"} for entry in slides} | {
@@ -433,6 +471,12 @@ class TestSlides:
 
 
 def test_journal_audio_stage_boundaries(tmp_path: Path, cfg, fake_stages: dict, args_namespace) -> None:
+    """Аудиовход: каждый этап закрывается, распознавание речи идёт до выжимки.
+
+    Поток распознавания подменён синхронным (см. фикстуру), поэтому порядок
+    событий детерминирован; настоящее перекрытие этапов проверяет
+    `TestParallelLayout` и tests/test_parallel.py.
+    """
     from absorbent.events import Journal
 
     fake_stages["video"] = False
@@ -443,12 +487,12 @@ def test_journal_audio_stage_boundaries(tmp_path: Path, cfg, fake_stages: dict, 
     starts = [row["stage"] for row in rows if row["event"] == "stage_start"]
     ends = [row for row in rows if row["event"] == "stage_end"]
     assert starts == [row["stage"] for row in ends] == [
-        "extract_frames", "select_keyframes", "prepare_slides", "stt",
+        "stt", "extract_frames", "select_keyframes", "prepare_slides", "summarize",
         "describe_keyframes", "describe_slides", "synthesize", "render"]
     assert {row["stage"]: row["status"] for row in ends} == {
-        "extract_frames": "skipped", "select_keyframes": "skipped", "prepare_slides": "skipped",
-        "stt": "ok", "describe_keyframes": "skipped", "describe_slides": "skipped",
-        "synthesize": "ok", "render": "ok"}
+        "stt": "ok", "extract_frames": "skipped", "select_keyframes": "skipped",
+        "prepare_slides": "skipped", "summarize": "ok", "describe_keyframes": "skipped",
+        "describe_slides": "skipped", "synthesize": "ok", "render": "ok"}
 
 
 def test_journal_cached_frame_selection_synthesis_and_render(tmp_path: Path, cfg, fake_stages: dict, args_namespace) -> None:
@@ -463,3 +507,158 @@ def test_journal_cached_frame_selection_synthesis_and_render(tmp_path: Path, cfg
     ends = {row["stage"]: row["status"] for row in rows if row["event"] == "stage_end"}
     assert {name: ends[name] for name in ("extract_frames", "select_keyframes", "synthesize", "render")} == {
         "extract_frames": "skipped", "select_keyframes": "skipped", "synthesize": "skipped", "render": "skipped"}
+
+
+class TestLocalProvider:
+    """Локальность провайдера: по ней решается, ждать ли whisper."""
+
+    @pytest.mark.parametrize(("base_url", "expected"), [
+        ("http://127.0.0.1:12434/v1", True),
+        ("http://127.0.0.2:9/v1", True),
+        ("http://localhost:12434/v1", True),
+        ("http://[::1]:12434/v1", True),
+        ("https://api.deepseek.com", False),
+        ("http://192.168.1.5:12434/v1", False),
+        ("", False),
+    ])
+    def test_local_provider(self, base_url: str, expected: bool) -> None:
+        assert _local_provider(Provider(name="p", base_url=base_url)) is expected
+
+
+class TestSlidesOverlap:
+    """Описание материалов перекрывается с распознаванием речи не всегда."""
+
+    def _vision(self, base_url: str) -> Provider:
+        return Provider(name="v", base_url=base_url)
+
+    @pytest.mark.parametrize(("backend", "base_url", "expected"), [
+        ("whisper", "https://api.deepseek.com", True),   # облачная модель GPU не занимает.
+        ("whisper", "http://127.0.0.1:12434/v1", False),  # whisper и локальная модель — одна карта.
+        ("voxtral", "http://127.0.0.1:12434/v1", True),   # whisper не запускается вовсе.
+        ("voxtral", "https://api.deepseek.com", True),
+    ])
+    def test_may_describe_slides_early(self, backend: str, base_url: str, expected: bool) -> None:
+        spec = ModelSpec(name="stt", backend=backend)
+        assert _may_describe_slides_early(spec, self._vision(base_url)) is expected
+
+
+class TestParallelLayout:
+    """Порядок этапов при разной локальности моделей и размер батча."""
+
+    def _config(self, tmp_path: Path, *, stt: str, vision_local: bool, provider_batch: int = 1,
+                model_batch: int | None = None, name: str = "config.yaml") -> Path:
+        vision_base = "http://127.0.0.1:12434/v1" if vision_local else "https://api.example.test/v1"
+        stt_block = ("whisper-local:\n    backend: whisper\n    whisper_model: tiny\n"
+                     if stt == "whisper" else
+                     "voxtral-cloud:\n    backend: voxtral\n    provider: mistral\n    model: v\n")
+        model_line = "" if model_batch is None else f"    batch_size: {model_batch}\n"
+        path = tmp_path / name
+        path.write_text(f"""providers:
+  vision:
+    base_url: {vision_base}
+    api_key_env: TEST_KEY_A
+    batch_size: {provider_batch}
+  mistral:
+    base_url: https://api.mistral.ai/v1
+    api_key_env: TEST_KEY_A
+stt:
+  {stt_block}    default: true
+vision:
+  vis-a:
+    provider: vision
+    default: true
+{model_line}llm:
+  llm-a:
+    provider: vision
+    default: true
+""", encoding="utf-8")
+        return path
+
+    def _deck(self, tmp_path: Path) -> Path:
+        deck = tmp_path / "deck.pdf"
+        deck.write_bytes(b"%PDF")
+        return deck
+
+    def test_local_vision_waits_for_whisper(self, tmp_path: Path, fake_stages: dict,
+                                            args_namespace) -> None:
+        """Локальная vision-модель делит карту с whisper: материалы описываются после."""
+        cfg_path = self._config(tmp_path, stt="whisper", vision_local=True)
+        args_namespace.slides = [self._deck(tmp_path)]
+        process_file(_input(tmp_path), load_config(str(cfg_path)), args_namespace)
+        assert fake_stages["calls"] == [
+            "thread", "stt:auto", "extract", "select:10:5.0", "slides", "summarize:ru",
+            "describe:ru:1", "slides:ru:1", "synthesize:ru:1", "render",
+        ]
+
+    def test_local_vision_with_cloud_stt_describes_early(self, tmp_path: Path, fake_stages: dict,
+                                                         args_namespace) -> None:
+        """С облачным распознаванием карта свободна: материалы описываются сразу."""
+        cfg_path = self._config(tmp_path, stt="voxtral", vision_local=True)
+        args_namespace.slides = [self._deck(tmp_path)]
+        process_file(_input(tmp_path), load_config(str(cfg_path)), args_namespace)
+        assert fake_stages["calls"] == [
+            "thread", "stt:auto", "extract", "select:10:5.0", "slides", "slides:ru:1",
+            "summarize:ru", "describe:ru:1", "synthesize:ru:1", "render",
+        ]
+
+    def test_provider_batch_size_reaches_describe(self, tmp_path: Path, fake_stages: dict,
+                                                  args_namespace) -> None:
+        cfg_path = self._config(tmp_path, stt="whisper", vision_local=False, provider_batch=5)
+        args_namespace.slides = [self._deck(tmp_path)]
+        process_file(_input(tmp_path), load_config(str(cfg_path)), args_namespace)
+        assert fake_stages["describe_batch"] == 5
+        assert fake_stages["slides_batch"] == 5
+
+    def test_model_batch_size_overrides_provider(self, tmp_path: Path, fake_stages: dict,
+                                                 args_namespace) -> None:
+        cfg_path = self._config(tmp_path, stt="whisper", vision_local=False, provider_batch=5,
+                                model_batch=2)
+        args_namespace.slides = [self._deck(tmp_path)]
+        process_file(_input(tmp_path), load_config(str(cfg_path)), args_namespace)
+        assert fake_stages["describe_batch"] == 2
+        assert fake_stages["slides_batch"] == 2
+
+    def test_summary_reaches_frame_prompt(self, tmp_path: Path, cfg, fake_stages: dict,
+                                          args_namespace) -> None:
+        """Выжимка транскрипта уходит в промпт каждого кадра."""
+        process_file(_input(tmp_path), cfg, args_namespace)
+        assert fake_stages["describe_summary"] == "выжимка лекции"
+        assert fake_stages["summary_transcript"] == [{"start": 0.0, "end": 1.0, "text": "привет",
+                                                     "speaker": None}]
+        assert (tmp_path / "Лекция" / ".absorbent" / "summary.md").read_text(
+            encoding="utf-8") == "выжимка лекции"
+
+    def test_empty_transcript_skips_summary(self, tmp_path: Path, cfg, fake_stages: dict,
+                                            args_namespace, monkeypatch: pytest.MonkeyPatch,
+                                            capsys: pytest.CaptureFixture) -> None:
+        """Без речи выжимка не выпрашивается: модель не вызывается вовсе."""
+
+        def _empty_stt(spec, provider, input_path, language, out_json, work_dir, force=False):
+            fake_stages["calls"].append(f"stt:{language}")
+            out_json.write_text("[]", encoding="utf-8")
+            work_dir.mkdir(parents=True, exist_ok=True)
+            return None
+
+        monkeypatch.setattr(fake_stages["module"], "run_stt", _empty_stt)
+        process_file(_input(tmp_path), cfg, args_namespace)
+        assert not any(call.startswith("summarize") for call in fake_stages["calls"])
+        assert fake_stages["describe_summary"] == ""
+        assert "выжимка транскрипта не нужна" in capsys.readouterr().out
+
+    def test_stt_error_stops_after_frame_preparation(self, tmp_path: Path, cfg, fake_stages: dict,
+                                                     args_namespace, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Ошибка распознавания всплывает после подготовки кадров и роняет прогон."""
+        from absorbent.transcribe import STTError
+
+        def _failing_stt(spec, provider, input_path, language, out_json, work_dir, force=False):
+            fake_stages["calls"].append(f"stt:{language}")
+            raise STTError("модель распознавания недоступна")
+
+        monkeypatch.setattr(fake_stages["module"], "run_stt", _failing_stt)
+        with pytest.raises(STTError, match="недоступна"):
+            process_file(_input(tmp_path), cfg, args_namespace)
+        # Кадры успели подготовиться: они шли параллельно распознаванию речи.
+        assert "extract" in fake_stages["calls"]
+        assert "select:10:5.0" in fake_stages["calls"]
+        assert not any(call.startswith(("describe", "summarize", "synthesize"))
+                       for call in fake_stages["calls"])

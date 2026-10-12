@@ -160,6 +160,26 @@ class TestWhisperProgress:
         assert completed == pytest.approx([0.0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.05])
         assert all(row["total"] == pytest.approx(0.05) for row in rows)
 
+    def test_no_progress_bars_reports_no_final_seconds(self, tmp_path: Path,
+                                                       fake_whisper: dict) -> None:
+        """Модель без полосы прогресса: финальные секунды не выдумываются.
+
+        Whisper создаёт tqdm по кадрам мел-спектрограммы не всегда; тогда
+        сообщать нечего, и этап не должен выдавать ложное завершение.
+        """
+        fake_whisper["segments"] = [{"start": 0.0, "end": 0.5, "text": "слово"}]
+        fake_whisper["language"] = "ru"
+        path = tmp_path / "events.jsonl"
+        with Journal(path):
+            with stage("stt"):
+                run_stt(_whisper_spec(), Provider(name="x", base_url=""), tmp_path / "in.mp4",
+                        "auto", tmp_path / "t.json", tmp_path)
+        progress = [row for row in (json.loads(line) for line in
+                                    path.read_text(encoding="utf-8").splitlines())
+                    if row["event"] == "stage_progress"]
+        assert progress == []
+        assert (tmp_path / "t.json").exists()
+
     def test_disabled_terminal_progress_still_reports_scanned_audio(self, tmp_path, fake_whisper, monkeypatch):
         import sys
         from absorbent.transcribe import _whisper_progress
