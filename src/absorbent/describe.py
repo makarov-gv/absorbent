@@ -9,7 +9,7 @@ from pathlib import Path
 
 from absorbent.api import create_client
 from absorbent.config import ModelSpec, Provider
-from absorbent.events import JournalError, api_call, skip_stage
+from absorbent.events import JournalError, api_call, report_progress, skip_stage
 from absorbent.slides import KIND_PHOTO, KIND_SLIDE
 
 # Окно транскрипта вокруг кадра, подаваемое модели (в обе стороны, секунды).
@@ -153,6 +153,12 @@ def describe_keyframes(vision_spec: ModelSpec, provider: Provider, keyframes: li
     pending = [kf for kf in keyframes if force or kf["image"] not in descriptions]
     if not pending:
         skip_stage()
+    # Прогресс считает готовые описания среди текущего набора кадров: старт
+    # учитывает уже описанные (кэш без force), каждый кадр прибавляет один.
+    # Кадр с ошибкой API тоже обработан (не будет повторён) и входит в счёт.
+    total = len(keyframes)
+    done = total - len(pending)
+    report_progress("images", done, total, force=True)
     for kf in pending:
         name = kf["image"]
         image_path = images_dir / name
@@ -166,6 +172,8 @@ def describe_keyframes(vision_spec: ModelSpec, provider: Provider, keyframes: li
             text = f"(ошибка описания кадра: {exc})"
         descriptions[name] = {"timestamp": kf["timestamp"], "description": text}
         out_json.write_text(json.dumps(descriptions, ensure_ascii=False, indent=2), encoding="utf-8")
+        done += 1
+        report_progress("images", done, total, force=done == total)
     return descriptions
 
 
@@ -199,6 +207,10 @@ def describe_slides(vision_spec: ModelSpec, provider: Provider, slides: list[dic
     pending = [entry for entry in slides if force or entry["image"] not in descriptions]
     if not pending:
         skip_stage()
+    # Как и у кадров: счёт ведётся по текущему набору материалов и учитывает кэш.
+    total = len(slides)
+    done = total - len(pending)
+    report_progress("images", done, total, force=True)
     for entry in pending:
         name = entry["image"]
         image_path = images_dir / name
@@ -222,4 +234,6 @@ def describe_slides(vision_spec: ModelSpec, provider: Provider, slides: list[dic
         descriptions[name] = {"page": entry["page"], "source": entry["source"],
                               "kind": entry.get("kind", KIND_SLIDE), "description": text}
         out_json.write_text(json.dumps(descriptions, ensure_ascii=False, indent=2), encoding="utf-8")
+        done += 1
+        report_progress("images", done, total, force=done == total)
     return descriptions

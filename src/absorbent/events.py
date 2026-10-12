@@ -22,6 +22,9 @@ _sink: ContextVar[Journal | None] = ContextVar("absorbent_journal", default=None
 _active_stage: ContextVar[StageStatus | None] = ContextVar("absorbent_stage", default=None)
 _call: ContextVar[dict | None] = ContextVar("absorbent_api_call", default=None)
 
+# Минимальный интервал между событиями stage_progress одного этапа, секунды.
+_PROGRESS_INTERVAL_SECONDS = 1.0
+
 
 class Journal:
     """Дописывать JSONL, сбрасывая каждое событие на диск до продолжения работы."""
@@ -108,9 +111,24 @@ class StageStatus:
     def __init__(self, name: str) -> None:
         self.name = name
         self.status = "ok"
+        # Время последнего сообщённого прогресса; троттлинг держит частоту.
+        self._progress_at = 0.0
 
     def skip(self) -> None:
         self.status = "skipped"
+
+    def report(self, unit: str, completed: float, total: float | None = None, *,
+               force: bool = False) -> None:
+        """Записать прогресс этапа, но не чаще раза в интервал без force.
+
+        force нужен для старта и финала: эти события не должны теряться из-за
+        троттлинга. Значения completed должны быть неубывающими у вызывающего.
+        """
+        now = time.monotonic()
+        if not force and now - self._progress_at < _PROGRESS_INTERVAL_SECONDS:
+            return
+        self._progress_at = now
+        emit("stage_progress", stage=self.name, unit=unit, completed=completed, total=total)
 
 
 def skip_stage() -> None:
@@ -118,6 +136,16 @@ def skip_stage() -> None:
     active = _active_stage.get()
     if active is not None:
         active.skip()
+
+
+def report_progress(unit: str, completed: float, total: float | None = None, *,
+                    force: bool = False) -> None:
+    """Сообщить прогресс активного этапа; без журнала не делает ничего."""
+    if current_journal() is None:
+        return
+    active = _active_stage.get()
+    if active is not None:
+        active.report(unit, completed, total, force=force)
 
 
 @contextmanager

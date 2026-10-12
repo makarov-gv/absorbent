@@ -9,11 +9,73 @@ from uuid import UUID
 
 import pytest
 
-from absorbent.events import Journal, JournalError, api_call, current_journal, emit, request_fields, skip_stage, stage
+from absorbent.events import (
+    Journal,
+    JournalError,
+    api_call,
+    current_journal,
+    emit,
+    report_progress,
+    request_fields,
+    skip_stage,
+    stage,
+)
 
 
 def records(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+class TestStageProgress:
+    """События прогресса этапа: поля, троттлинг, границы контекста."""
+
+    def test_reports_fields_and_throttles_between_forced_events(self, tmp_path: Path) -> None:
+        path = tmp_path / "events.jsonl"
+        with Journal(path):
+            with stage("stt") as status:
+                report_progress("seconds", 0.0, 30.0, force=True)
+                report_progress("seconds", 12.0, 30.0)  # подавлен троттлингом.
+                report_progress("seconds", 30.0, 30.0, force=True)
+        rows = [row for row in records(path) if row["event"] == "stage_progress"]
+        assert [(row["completed"], row["total"]) for row in rows] == [(0.0, 30.0), (30.0, 30.0)]
+        assert all(row["stage"] == "stt" and row["unit"] == "seconds" for row in rows)
+        assert all(row["schema_version"] == 1 for row in rows)
+
+    def test_interval_allows_intermediate_events(self, tmp_path: Path,
+                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("absorbent.events._PROGRESS_INTERVAL_SECONDS", 0.0)
+        path = tmp_path / "events.jsonl"
+        with Journal(path):
+            with stage("describe_keyframes"):
+                for done in range(1, 4):
+                    report_progress("images", done, 3)
+        completed = [row["completed"] for row in records(path)
+                     if row["event"] == "stage_progress"]
+        assert completed == [1, 2, 3]
+
+    def test_no_journal_writes_nothing(self, capsys: pytest.CaptureFixture) -> None:
+        with stage("stt"):
+            report_progress("seconds", 1.0, 2.0, force=True)
+        assert capsys.readouterr() == ("", "")
+
+    def test_outside_stage_is_ignored(self, tmp_path: Path) -> None:
+        path = tmp_path / "events.jsonl"
+        with Journal(path):
+            report_progress("images", 1, 2, force=True)
+        assert [row for row in records(path) if row["event"] == "stage_progress"] == []
+
+    def test_progress_stage_resets_between_stages(self, tmp_path: Path,
+                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+        # Троттлинг не переносится на следующий этап: первый нефорсированный
+        # вызов нового этапа не должен подавляться временем предыдущего.
+        path = tmp_path / "events.jsonl"
+        with Journal(path):
+            with stage("describe_keyframes"):
+                report_progress("images", 1, 1, force=True)
+            with stage("describe_slides"):
+                report_progress("images", 1, 1)
+        stages = [row["stage"] for row in records(path) if row["event"] == "stage_progress"]
+        assert stages == ["describe_keyframes", "describe_slides"]
 
 
 class FailingFile:

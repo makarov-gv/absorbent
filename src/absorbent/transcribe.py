@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 from absorbent.api import create_client
 from absorbent.config import ModelSpec, Provider, api_key_from
-from absorbent.events import api_call, skip_stage
+from absorbent.events import api_call, current_journal, report_progress, skip_stage
 
 # Канонический промежуточный формат — transcript.json:
 # [{"start": float, "end": float, "text": str, "speaker": str | None}, ...]
@@ -23,6 +26,57 @@ def _write_transcript(out_json: Path, segments: list[dict]) -> None:
         json.dump(segments, handle, ensure_ascii=False, indent=2)
 
 
+@contextmanager
+def _whisper_progress() -> Iterator[None]:
+    """Сообщать журналу обработанные секунды whisper по ходу распознавания.
+
+    Своего колбэка у [whisper.model.Whisper.transcribe()] нет: прогресс ведёт
+    внутренний tqdm по кадрам мел-спектрограммы. Пока идёт вызов, подменяем
+    ссылку на tqdm в модуле [whisper.transcribe] адаптером, который переводит
+    кадры в секунды (один кадр — 10 мс) и передаёт их как stage_progress.
+    Без активного журнала ничего не подменяем и не импортируем whisper.
+    """
+    if current_journal() is None:
+        yield
+        return
+    import tqdm as tqdm_module
+    from whisper.audio import HOP_LENGTH, SAMPLE_RATE
+
+    seconds_per_frame = HOP_LENGTH / SAMPLE_RATE
+    whisper_transcribe = importlib.import_module("whisper.transcribe")
+    state: dict[str, float | None] = {"total": None}
+
+    class _RecordingTqdm(tqdm_module.tqdm):
+        """tqdm whisper: кадры мел-спектрограммы превращает в секунды аудио."""
+
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self._processed_frames = 0
+            total = self.total * seconds_per_frame if self.total else None
+            state["total"] = total
+            report_progress("seconds", 0.0, total, force=True)
+
+        def update(self, n: float = 1) -> None:
+            # При disable=True tqdm не увеличивает n, но whisper продолжает обработку.
+            self._processed_frames += n
+            super().update(n)
+            report_progress("seconds", self._processed_frames * seconds_per_frame, state["total"])
+
+    class _TqdmShim:
+        tqdm = _RecordingTqdm
+
+    previous = whisper_transcribe.tqdm
+    whisper_transcribe.tqdm = _TqdmShim
+    try:
+        yield
+    finally:
+        whisper_transcribe.tqdm = previous
+    # Финал — только при успешном возврате: при ошибке весь файл не обработан.
+    total = state["total"]
+    if total is not None:
+        report_progress("seconds", total, total, force=True)
+
+
 def _whisper_transcribe(spec: ModelSpec, input_path: Path, language: str) -> tuple[list[dict], str | None]:
     """Локальная транскрипция через openai-whisper; возвращает (сегменты, язык)."""
     import torch
@@ -30,12 +84,13 @@ def _whisper_transcribe(spec: ModelSpec, input_path: Path, language: str) -> tup
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = whisper.load_model(spec.whisper_model, device=device)
-    result = model.transcribe(
-        str(input_path),
-        language=(None if language == "auto" else language),
-        beam_size=5,
-        verbose=False,
-    )
+    with _whisper_progress():
+        result = model.transcribe(
+            str(input_path),
+            language=(None if language == "auto" else language),
+            beam_size=5,
+            verbose=False,
+        )
     segments = [
         {"start": float(seg["start"]), "end": float(seg["end"]), "text": seg["text"].strip(), "speaker": None}
         for seg in result["segments"]
@@ -85,6 +140,11 @@ def _voxtral_transcribe(spec: ModelSpec, provider: Provider, input_path: Path, l
     extra_headers = {"X-Api-Key": api_key} if api_key else {}
     client = create_client(provider)
     _extract_audio(input_path, audio_path)
+    # У облачного вызова промежуточного прогресса нет: сообщаем только старт и
+    # финал по длительности отправленной дорожки (реальный объём работы).
+    total_seconds = _audio_duration_seconds(audio_path) if current_journal() else 0.0
+    if total_seconds:
+        report_progress("seconds", 0.0, total_seconds, force=True)
 
     with open(audio_path, "rb") as audio_file, api_call("stt", provider.name, spec.api_model):
         # Mistral-специфичные поля уходят через extra_body, а не именованные
@@ -123,6 +183,8 @@ def _voxtral_transcribe(spec: ModelSpec, provider: Provider, input_path: Path, l
             "speaker": None,
         })
     detected = data.get("language") or None
+    if total_seconds:
+        report_progress("seconds", total_seconds, total_seconds, force=True)
     return segments, detected
 
 

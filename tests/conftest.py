@@ -176,15 +176,29 @@ def fake_openai(monkeypatch: pytest.MonkeyPatch) -> FakeOpenAI:
 
 @pytest.fixture
 def fake_whisper(monkeypatch: pytest.MonkeyPatch) -> dict:
-    """Подменяет torch/whisper: load_model возвращает записывающую подделку."""
+    """Подменяет torch/whisper: load_model возвращает записывающую подделку.
+
+    Подмодули whisper.transcribe и whisper.audio тоже подставлены: первый несёт
+    ссылку на tqdm (её подменяет live-прогресс transcribe), второй — постоянные
+    пересчёта кадров в секунды. Если в state задан ключ frames, FakeModel
+    проигрывает tqdm по кадрам, как это делает настоящий whisper.
+    """
     import sys
     import types
+
+    import tqdm as real_tqdm
 
     state: dict = {"load_calls": [], "transcribe_calls": [], "segments": [], "language": None}
 
     class FakeModel:
         def transcribe(self, path, **kwargs):
             state["transcribe_calls"].append({"path": path, **kwargs})
+            frames = state.get("frames")
+            if frames:
+                module = sys.modules["whisper.transcribe"]
+                with module.tqdm.tqdm(total=frames, unit="frames", disable=False) as pbar:
+                    for _ in range(frames):
+                        pbar.update(1)
             return {"segments": state["segments"], "language": state["language"]}
 
     def _load_model(name, device=None):
@@ -199,8 +213,15 @@ def fake_whisper(monkeypatch: pytest.MonkeyPatch) -> dict:
     fake_torch.cuda.is_available = _cuda_available
     fake_whisper_mod = types.ModuleType("whisper")
     fake_whisper_mod.load_model = _load_model
+    fake_transcribe_mod = types.ModuleType("whisper.transcribe")
+    fake_transcribe_mod.tqdm = real_tqdm
+    fake_audio_mod = types.ModuleType("whisper.audio")
+    fake_audio_mod.HOP_LENGTH = 160
+    fake_audio_mod.SAMPLE_RATE = 16000
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
     monkeypatch.setitem(sys.modules, "whisper", fake_whisper_mod)
+    monkeypatch.setitem(sys.modules, "whisper.transcribe", fake_transcribe_mod)
+    monkeypatch.setitem(sys.modules, "whisper.audio", fake_audio_mod)
     return state
 
 

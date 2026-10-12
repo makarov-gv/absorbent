@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from absorbent.config import ConfigError, ModelSpec, Provider, load_config
+from absorbent.events import Journal, stage
 from absorbent.transcribe import STTError, run_stt
 
 REPO_CONFIG = Path(__file__).resolve().parents[1] / "config.yaml"
@@ -123,6 +124,100 @@ class TestWhisperBackend:
         run_stt(_whisper_spec(), Provider(name="x", base_url=""), tmp_path / "in.mp4", "auto", out,
                 tmp_path, force=True)
         assert not out.with_name("language.txt").exists()
+
+
+class TestWhisperProgress:
+    """Живой прогресс whisper: кадры мел-спектрограммы пересчитываются в секунды."""
+
+    def _run(self, tmp_path: Path, fake_whisper: dict, frames: int) -> list[dict]:
+        fake_whisper["frames"] = frames
+        fake_whisper["segments"] = [{"start": 0.0, "end": 0.5, "text": "слово"}]
+        fake_whisper["language"] = "ru"
+        path = tmp_path / "events.jsonl"
+        with Journal(path):
+            with stage("stt"):
+                run_stt(_whisper_spec(), Provider(name="x", base_url=""), tmp_path / "in.mp4",
+                        "auto", tmp_path / "t.json", tmp_path)
+        return [row for row in (json.loads(line) for line in
+                                path.read_text(encoding="utf-8").splitlines())
+                if row["event"] == "stage_progress"]
+
+    def test_start_and_final_seconds(self, tmp_path: Path, fake_whisper: dict) -> None:
+        rows = self._run(tmp_path, fake_whisper, frames=30)
+        assert rows[0]["stage"] == "stt"
+        assert rows[0]["unit"] == "seconds"
+        assert rows[0]["completed"] == 0.0
+        assert rows[0]["total"] == pytest.approx(0.3)
+        assert rows[-1]["completed"] == pytest.approx(0.3)
+        assert rows[-1]["total"] == pytest.approx(0.3)
+
+    def test_monotonic_seconds_when_interval_allows(self, tmp_path: Path, fake_whisper: dict,
+                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("absorbent.events._PROGRESS_INTERVAL_SECONDS", 0.0)
+        rows = self._run(tmp_path, fake_whisper, frames=5)
+        completed = [row["completed"] for row in rows]
+        # Старт, по событию на кадр, затем финальное подтверждение полноты.
+        assert completed == pytest.approx([0.0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.05])
+        assert all(row["total"] == pytest.approx(0.05) for row in rows)
+
+    def test_disabled_terminal_progress_still_reports_scanned_audio(self, tmp_path, fake_whisper, monkeypatch):
+        import sys
+        from absorbent.transcribe import _whisper_progress
+
+        monkeypatch.setattr("absorbent.events._PROGRESS_INTERVAL_SECONDS", 0.0)
+        path = tmp_path / "events.jsonl"
+        with Journal(path), stage("stt"), _whisper_progress():
+            with sys.modules["whisper.transcribe"].tqdm.tqdm(total=1000, disable=True) as progress:
+                progress.update(250)
+                rows = [json.loads(line) for line in path.read_text().splitlines()]
+                current = [row for row in rows if row["event"] == "stage_progress"][-1]
+                assert current["completed"] == pytest.approx(2.5)
+                assert current["total"] == pytest.approx(10.0)
+
+    def test_no_journal_leaves_whisper_untouched(self, tmp_path: Path, fake_whisper: dict) -> None:
+        import sys
+
+        fake_whisper["segments"] = []
+        fake_whisper["language"] = None
+        original = sys.modules["whisper.transcribe"].tqdm
+        run_stt(_whisper_spec(), Provider(name="x", base_url=""), tmp_path / "in.mp4", "auto",
+                tmp_path / "t.json", tmp_path)
+        assert sys.modules["whisper.transcribe"].tqdm is original
+
+
+class TestVoxtralProgress:
+    """Облачный STT: прогресс ограничен стартом и финалом по длительности дорожки."""
+
+    def test_start_and_final_sent_seconds(self, tmp_path: Path, fake_openai,
+                                          monkeypatch: pytest.MonkeyPatch) -> None:
+        import absorbent.transcribe as transcribe_module
+
+        monkeypatch.setenv("MISTRAL_API_KEY", "key123")
+        monkeypatch.setattr(transcribe_module, "_extract_audio",
+                            lambda input_path, audio_path: audio_path.write_bytes(b"wav"))
+        durations: list[Path] = []
+
+        def _duration(path: Path) -> float:
+            durations.append(path)
+            return 120.0
+
+        monkeypatch.setattr(transcribe_module, "_audio_duration_seconds", _duration)
+        fake_openai.audio.transcriptions.payload = {
+            "text": "t", "language": "ru",
+            "segments": [{"text": "раз", "start": 0.0, "end": 1.0, "speaker_id": None}],
+            "usage": {},
+        }
+        provider = load_config(str(REPO_CONFIG)).providers["mistral"]
+        path = tmp_path / "events.jsonl"
+        with Journal(path):
+            with stage("stt"):
+                run_stt(_voxtral_spec(), provider, tmp_path / "in.mp4", "auto",
+                        tmp_path / "t.json", tmp_path)
+        rows = [row for row in (json.loads(line) for line in
+                                path.read_text(encoding="utf-8").splitlines())
+                if row["event"] == "stage_progress"]
+        assert [(row["completed"], row["total"]) for row in rows] == [(0.0, 120.0), (120.0, 120.0)]
+        assert all(row["unit"] == "seconds" and row["stage"] == "stt" for row in rows)
 
 
 class TestVoxtralBackend:

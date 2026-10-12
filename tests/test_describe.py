@@ -16,6 +16,7 @@ from absorbent.describe import (
     describe_keyframes,
     describe_slides,
 )
+from absorbent.events import Journal, stage
 
 VISION_SPEC = ModelSpec(name="vis", provider="p", default=True)
 
@@ -206,6 +207,112 @@ class TestDescribeKeyframes:
         describe_keyframes(VISION_SPEC, provider, keyframes, [], images_dir, "ru",
                            tmp_path / "descriptions.json")
         assert fake_openai.instances[-1].api_key == PLACEHOLDER_API_KEY
+
+
+class TestDescribeProgress:
+    """Прогресс описания: счёт по текущему набору с учётом кэша и финала."""
+
+    def _frame(self, seconds: int) -> dict:
+        stamp = f"00:00:{seconds:02d}"
+        return {"image": f"frame_00_00_{seconds:02d}.jpg", "seconds": float(seconds),
+                "timestamp": stamp}
+
+    def _progress(self, path: Path) -> list[dict]:
+        return [row for row in (json.loads(line) for line in
+                                path.read_text(encoding="utf-8").splitlines())
+                if row["event"] == "stage_progress"]
+
+    def test_keyframes_counts_cache_then_each_description(self, tmp_path: Path, fake_openai,
+                                                          monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        monkeypatch.setattr("absorbent.events._PROGRESS_INTERVAL_SECONDS", 0.0)
+        images_dir = tmp_path / "images"
+        keyframes = [self._frame(0), self._frame(5), self._frame(10)]
+        for kf in keyframes:
+            _make_image(images_dir, kf["image"])
+        out = tmp_path / "descriptions.json"
+        out.write_text(json.dumps({"frame_00_00_00.jpg": {"timestamp": "00:00:00",
+                                                          "description": "старое"}}),
+                       encoding="utf-8")
+        fake_openai.set_replies(["второе", "третье"])
+        path = tmp_path / "events.jsonl"
+        with Journal(path):
+            with stage("describe_keyframes"):
+                describe_keyframes(VISION_SPEC, _provider(), keyframes, [], images_dir, "ru", out)
+        rows = self._progress(path)
+        assert [row["completed"] for row in rows] == [1, 2, 3]
+        assert all(row["total"] == 3 and row["unit"] == "images" for row in rows)
+        assert all(row["stage"] == "describe_keyframes" for row in rows)
+
+    def test_fully_cached_stage_reports_complete_but_marked_skipped(
+            self, tmp_path: Path, fake_openai, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        images_dir = tmp_path / "images"
+        keyframes = [self._frame(0)]
+        _make_image(images_dir, keyframes[0]["image"])
+        out = tmp_path / "descriptions.json"
+        out.write_text(json.dumps({"frame_00_00_00.jpg": {"timestamp": "00:00:00",
+                                                          "description": "старое"}}),
+                       encoding="utf-8")
+        path = tmp_path / "events.jsonl"
+        with Journal(path):
+            with stage("describe_keyframes"):
+                describe_keyframes(VISION_SPEC, _provider(), keyframes, [], images_dir, "ru", out)
+        rows = self._progress(path)
+        assert [(row["completed"], row["total"]) for row in rows] == [(1, 1)]
+        ends = [row for row in (json.loads(line) for line in
+                                path.read_text(encoding="utf-8").splitlines())
+                if row["event"] == "stage_end"]
+        assert ends[-1]["status"] == "skipped"
+
+    def test_errored_frame_still_advances_counter(self, tmp_path: Path, fake_openai,
+                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+        # Кадр с ошибкой API не будет повторён, поэтому он обработан: счёт растёт.
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        monkeypatch.setattr("absorbent.events._PROGRESS_INTERVAL_SECONDS", 0.0)
+        images_dir = tmp_path / "images"
+        keyframes = [self._frame(0), self._frame(5)]
+        for kf in keyframes:
+            _make_image(images_dir, kf["image"])
+        completions = fake_openai.chat.completions
+        original = completions.create
+        state = {"n": 0}
+
+        def _flaky(**kwargs):
+            state["n"] += 1
+            if state["n"] == 1:
+                raise RuntimeError("network down")
+            return original(**kwargs)
+
+        monkeypatch.setattr(completions, "create", _flaky)
+        path = tmp_path / "events.jsonl"
+        with Journal(path):
+            with stage("describe_keyframes"):
+                describe_keyframes(VISION_SPEC, _provider(), keyframes, [], images_dir, "ru",
+                                   tmp_path / "descriptions.json")
+        assert [row["completed"] for row in self._progress(path)] == [0, 1, 2]
+
+    def test_slides_counts_cache_then_each_page(self, tmp_path: Path, fake_openai,
+                                                monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TEST_KEY_A", "k")
+        monkeypatch.setattr("absorbent.events._PROGRESS_INTERVAL_SECONDS", 0.0)
+        images_dir = tmp_path / "images"
+        slides = [{"image": f"slide_{i:03d}.png", "page": i, "source": "/decks/d.pdf",
+                   "source_page": i} for i in (1, 2)]
+        for slide in slides:
+            _make_image(images_dir, slide["image"])
+        out = tmp_path / "slide_descriptions.json"
+        out.write_text(json.dumps({"slide_001.png": {"page": 1, "source": "/decks/d.pdf",
+                                                     "description": "старое"}}),
+                       encoding="utf-8")
+        fake_openai.set_replies(["второе"])
+        path = tmp_path / "events.jsonl"
+        with Journal(path):
+            with stage("describe_slides"):
+                describe_slides(VISION_SPEC, _provider(), slides, images_dir, "ru", out)
+        rows = self._progress(path)
+        assert [row["completed"] for row in rows] == [1, 2]
+        assert all(row["total"] == 2 and row["stage"] == "describe_slides" for row in rows)
 
 
 class TestDescribeSlides:
