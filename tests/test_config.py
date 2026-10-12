@@ -43,8 +43,8 @@ class TestLoadConfig:
         assert cfg.stt["voxtral-transcribe-2"].provider == "mistral"
         assert cfg.stt["voxtral-transcribe-2"].model == "voxtral-mini-latest"
         assert cfg.stt["voxtral-transcribe-2"].api_model == "voxtral-mini-latest"
-        assert cfg.vision["deepseek-v4-flash-vision-exp"].default is True
-        assert cfg.llm["deepseek-v4-flash"].default is True
+        assert cfg.vision["deepseek-flash"].default is True
+        assert cfg.llm["deepseek-flash"].default is True
         assert not cfg.llm["deepseek-v4-pro"].default
 
     def test_missing_explicit_path(self, tmp_path: Path) -> None:
@@ -106,9 +106,9 @@ class TestResolve:
         assert stt_provider.name == "whisper"  # whisper-бэкенд не имеет провайдера.
         assert stt_provider.base_url == ""
         _, vision_spec = cfg.resolve("vision")
-        assert vision_spec.name == "deepseek-v4-flash-vision-exp"
+        assert vision_spec.name == "deepseek-flash"
         _, llm_spec = cfg.resolve("llm")
-        assert llm_spec.name == "deepseek-v4-flash"
+        assert llm_spec.name == "deepseek-flash"
 
     def test_named(self) -> None:
         cfg = _repo_cfg()
@@ -173,8 +173,8 @@ class TestDefaultName:
     def test_repo_config_defaults(self) -> None:
         cfg = _repo_cfg()
         assert cfg.default_name("stt") == "whisper-turbo"
-        assert cfg.default_name("vision") == "deepseek-v4-flash-vision-exp"
-        assert cfg.default_name("llm") == "deepseek-v4-flash"
+        assert cfg.default_name("vision") == "deepseek-flash"
+        assert cfg.default_name("llm") == "deepseek-flash"
 
     def test_none_without_default(self, tmp_path: Path) -> None:
         path = tmp_path / "config.yaml"

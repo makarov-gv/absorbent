@@ -26,7 +26,7 @@ stt:
     model: voxtral-mini-latest
 
 vision:
-  deepseek-v4-flash-vision-exp:
+  deepseek-flash:
     provider: deepseek
     default: true
   gemma4-26b-vision:
@@ -35,7 +35,7 @@ vision:
     provider: llama-swap
 
 llm:
-  deepseek-v4-flash:
+  deepseek-flash:
     provider: deepseek
     default: true
   deepseek-v4-pro:

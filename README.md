@@ -315,7 +315,7 @@ stt:                       # распознавание речи
     model: voxtral-mini-latest
 
 vision:                    # описание кадров
-  deepseek-v4-flash-vision-exp:
+  deepseek-flash:
     provider: deepseek
     default: true
   gemma4-26b-vision:
@@ -323,7 +323,7 @@ vision:                    # описание кадров
     batch_size: 2          # значение модели перекрывает значение провайдера
 
 llm:                       # синтез конспекта и выжимка транскрипта
-  deepseek-v4-flash:
+  deepseek-flash:
     provider: deepseek
     default: true
 ```
@@ -345,7 +345,7 @@ llm:                       # синтез конспекта и выжимка �
   но ни один настоящий ключ в него не подставляется;
 - у моделей `stt` с `backend: whisper` поле `whisper_model` задаёт модель
   openai-whisper; у облачных бэкендов поле `model` — id модели в API, а если
-  оно не задано, в API уходит имя ключа секции (`deepseek-v4-flash` для такой
+  оно не задано, в API уходит имя ключа секции (`deepseek-flash` для такой
   записи выше);
 - `batch_size` задаёт, сколько запросов к одной модели идёт одновременно
   (этап описания картинок работает окнами такого размера). Он указывается у
