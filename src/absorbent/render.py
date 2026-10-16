@@ -1,7 +1,8 @@
 """Постпроцессинг готового notes.md: выравнивание таблиц, HTML, PDF.
 
-Таблицы выравнивает встроенный модуль [md_tables]; внешняя программа только
-одна — pandoc, он собирает HTML и (через lualatex) PDF.
+Таблицы выравнивает, а таблицы и списки, слипшиеся с абзацем, разделяет встроенный
+модуль [md_tables]; внешняя программа только одна — pandoc, он собирает HTML и
+(через lualatex) PDF.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from absorbent.md_tables import DEFAULT_MAX_WIDTH, process_file
+from absorbent.md_tables import process_file
 
 # Пути к ресурсам пакета: CSS-шаблон GitHub для HTML-версии конспекта.
 ASSETS_DIR = Path(__file__).parent / "assets"
@@ -150,8 +151,8 @@ def _html_parts(tmp: Path) -> tuple[Path, Path, Path]:
 
 
 def fmt_tables(notes_md: Path) -> None:
-    """Выровнять pipe-таблицы notes.md встроенным модулем [md_tables]."""
-    process_file(notes_md, DEFAULT_MAX_WIDTH, backup_dir=None, quiet=True)
+    """Выровнять таблицы notes_md и отделить пустой строкой слипшиеся блоки."""
+    process_file(notes_md, backup_dir=None, quiet=True)
 
 
 def render_html(notes_md: Path, out_html: Path, lang: str = "ru") -> None:
