@@ -306,3 +306,34 @@ class TestRenderAll:
         assert (html, pdf) == (tmp_path / "lecture.html", tmp_path / "lecture.pdf")
         assert html.exists() and pdf.exists()
         assert order == ["pandoc", "pandoc"]
+
+
+@pytest.mark.skipif(
+    any(shutil.which(tool) is None for tool in ("pandoc", "lualatex", "pdftotext")),
+    reason="Нужны pandoc, lualatex и pdftotext.",
+)
+@pytest.mark.parametrize("inline,display", [(("$", "$"), ("$$", "$$")),
+                                         ((r"\(", r"\)"), (r"\[", r"\]"))])
+def test_math_survives_html_and_pdf(tmp_path: Path, inline, display) -> None:
+    """Формулы распознаются, а код с такими же разделителями остаётся кодом."""
+    notes = tmp_path / "notes.md"
+    notes.write_text(
+        "# Math notes\n\n"
+        f"Inline {inline[0]}T_w{inline[1]}.\n\n"
+        f"{display[0]}\n"
+        r"\{(I_w,T_w)\} \xrightarrow{\text{Captioner}} \{(I_w,T_s)\}."
+        f"\n{display[1]}\n\n"
+        r"`\(literal\)`" "\n\n"
+        "```\n" r"\[not math\]" "\n```\n\nEnd of notes.\n",
+        encoding="utf-8",
+    )
+    html, pdf = render_all(notes, lang="en")
+    page = html.read_text(encoding="utf-8")
+    assert page.count("<math ") == 2
+    assert r"<code>\(literal\)</code>" in page
+    assert r"\[not math\]" in page
+    text = subprocess.run(
+        ["pdftotext", str(pdf), "-"], check=True, capture_output=True, text=True,
+    ).stdout
+    assert "Captioner" in text
+    assert "End of notes." in text

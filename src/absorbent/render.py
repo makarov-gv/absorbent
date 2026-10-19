@@ -170,6 +170,7 @@ def render_html(notes_md: Path, out_html: Path, lang: str = "ru") -> None:
         cmd = [
             _tool(PANDOC), str(body_md), "-o", str(out_html),
             "--standalone", "--embed-resources", "--mathml",
+            "--from", "markdown+tex_math_single_backslash",
             "--resource-path", str(notes_md.parent),
             "-V", f"lang={lang}",
             "-H", str(header), "-B", str(before), "-A", str(after),
@@ -195,6 +196,7 @@ def render_pdf(notes_md: Path, out_pdf: Path, lang: str = "ru") -> None:
         cmd = [
             _tool(PANDOC), str(body_md), "-o", str(out_pdf),
             "--pdf-engine=lualatex", "-V", f"geometry:{PDF_GEOMETRY}",
+            "--from", "markdown+tex_math_single_backslash",
             "-V", f"lang={lang}",
             "--resource-path", str(notes_md.parent),
             "-H", str(header),
